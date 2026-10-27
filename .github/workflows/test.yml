@@ -19,6 +19,9 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pinned: `stable` drifts, and newer forge fmt releases reformat the code.
+          version: v1.2.3
 
       - name: Show Forge version
         run: |
@@ -49,6 +52,9 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pinned: `stable` drifts, and newer forge fmt releases reformat the code.
+          version: v1.2.3
 
       - name: Run fork tests
         env:
