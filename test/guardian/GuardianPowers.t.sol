@@ -2035,7 +2035,9 @@ contract GuardianPowersTest is BaseTest {
   }
 
   function testFuzz_regression_setGuardianNeverLeavesOverlap(address anyGuardian, bool funding, bool recall_) public {
-    vm.assume(anyGuardian != address(0) && anyGuardian != fundingOperator && anyGuardian != recallOperator);
+    // The current Guardian cannot be granted an operator role in the first place (OperatorCannotBeGuardian).
+    vm.assume(anyGuardian != address(0) && anyGuardian != manager.guardian());
+    vm.assume(anyGuardian != fundingOperator && anyGuardian != recallOperator);
     vm.startPrank(address(timelock));
     if (funding) manager.setFundingOperator(anyGuardian, true);
     else if (recall_) manager.setRecallOperator(anyGuardian, true);
