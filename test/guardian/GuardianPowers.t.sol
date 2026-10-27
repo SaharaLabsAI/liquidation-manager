@@ -2019,21 +2019,31 @@ contract GuardianPowersTest is BaseTest {
     assertTrue(manager.isFundingOperator(guardian));
   }
 
-  /// @dev `OperatorRolesMustBeSeparate` is checked before `OperatorCannotBeGuardian`; `setGuardian` stays
-  /// unconditional.
-  function test_regression_operatorCannotBeGuardian_checkedAfterRoleSeparation() public {
+  /// @dev `setGuardian` never reverts; it revokes the operator role of the new Guardian, and the role cannot be granted
+  /// back while it is the Guardian.
+  function test_regression_setGuardian_revokesOperatorRole() public {
     vm.startPrank(address(timelock));
     manager.setGuardian(recallOperator);
     assertEq(manager.guardian(), recallOperator);
+    assertFalse(manager.isRecallOperator(recallOperator));
 
-    vm.expectRevert(abi.encodeWithSelector(ILiquidityManager.OperatorRolesMustBeSeparate.selector, recallOperator));
+    vm.expectRevert(abi.encodeWithSelector(ILiquidityManager.OperatorCannotBeGuardian.selector, recallOperator));
     manager.setFundingOperator(recallOperator, true);
     vm.expectRevert(abi.encodeWithSelector(ILiquidityManager.OperatorCannotBeGuardian.selector, recallOperator));
     manager.setRecallOperator(recallOperator, true);
-    // The owner can still revoke the role the new Guardian held before its appointment.
-    manager.setRecallOperator(recallOperator, false);
     vm.stopPrank();
-    assertFalse(manager.isRecallOperator(recallOperator));
+  }
+
+  function testFuzz_regression_setGuardianNeverLeavesOverlap(address anyGuardian, bool funding, bool recall_) public {
+    vm.assume(anyGuardian != address(0) && anyGuardian != fundingOperator && anyGuardian != recallOperator);
+    vm.startPrank(address(timelock));
+    if (funding) manager.setFundingOperator(anyGuardian, true);
+    else if (recall_) manager.setRecallOperator(anyGuardian, true);
+    manager.setGuardian(anyGuardian);
+    vm.stopPrank();
+    assertEq(manager.guardian(), anyGuardian);
+    assertFalse(manager.isFundingOperator(anyGuardian));
+    assertFalse(manager.isRecallOperator(anyGuardian));
   }
 
   function testFuzz_regression_guardianNeverGrantedOperatorRole(address anyGuardian) public {

@@ -44,7 +44,8 @@ Deployed dependencies, identical addresses on both chains: SAHARA `0xFDFfB411C4A
 Guardian restrictions are enforced in code: limits, budget capacities and refill rates only decrease; the pool
 minimum only increases; pauses, suspensions and adapter restrictions only switch off. Restoring any of them requires
 the Timelock. Every Guardian call emits `GuardianAction(guardian, selector)`. Operator roles are mutually exclusive
-and cannot be granted to the Guardian. `renounceOwnership` is disabled.
+and cannot be granted to the Guardian; `setGuardian` revokes any operator role the new Guardian held (it never
+reverts). `renounceOwnership` is disabled.
 
 ## Fund and recall
 
@@ -131,10 +132,16 @@ that the deployer, the Guardian and the controller hold no unexpected Timelock r
 keeper as executor next to the Governance Safe. Recover from an interrupted broadcast only with
 `forge script --resume`; never continue manually from a partially deployed Timelock.
 
-Then `script/Handover.s.sol:Handover` (env additionally `LEGACY_MULTISIG`, `GOVERNANCE_SAFE`) runs a preflight
-against live state (deployment wiring including the controller's bindings and `CANCELLER_ROLE`, the legacy multisig
-still holding every authority, pool version and Router, operator and threshold sanity) and prints the calls for the
-handover (`HandoverPlan`):
+Then `script/Handover.s.sol:Handover` (env additionally `LEGACY_MULTISIG`, `GOVERNANCE_SAFE`) checks live state and
+prints the calls for the handover (`HandoverPlan`):
+
+- preflight: deployment wiring (controller bindings and `CANCELLER_ROLE`, Safe roles by duty: the legacy multisig may
+  also be the Governance Safe), the legacy multisig still holding every authority, the live pool matching the full
+  PoolSpec (version, Router, counterpart chain, remote token and remote pools), operator and threshold sanity;
+- simulation: runs the legacy calls and the Timelock batch on the current state and requires `verifyHandover`,
+  `verifyAdapter` and the pool authorities to hold afterwards, then reverts the state. Any input that would make the
+  batch revert is caught before the legacy multisig hands over the (single-step) token ownership.
+
 
 1. Legacy multisig (current pool owner, registry administrator and token owner), ideally one MultiSend:
    `pool.setRateLimitAdmin(controller)`, `pool.transferOwnership(timelock)`,
@@ -181,8 +188,8 @@ document and are passed to `Handover` through the environment.
 - `raisePoolMinimum` may lift the minimum above the published refill trigger/target; keepers should use
   `max(minimum, trigger)`. A Guardian reduction of a never-configured budget emits a `(0, 0)` event but leaves the
   budget unconfigured; to keep a new budget from starting full, cancel the queued first configuration instead.
-- `setGuardian` is unconditional so recovery always executes; check off-chain that the new Guardian holds no operator
-  role. `updateDelay` with an out-of-range value reverts at execution and stays scheduled until cancelled.
+- `setGuardian` has no revert path so recovery always executes. `updateDelay` with an out-of-range value reverts at
+  execution and stays scheduled until cancelled.
 - Monitor: Manager, adapter and pool balances and inflows, `Funded`/`Recalled`, `GuardianAction` and every
   configuration event, Timelock `CallScheduled`/`Cancelled`/`MinDelayChange` and role events, pool owner, rebalancer,
   `rateLimitAdmin`, Router, remote configuration and rate limits, registry mapping and administrator, token owner and
@@ -197,8 +204,14 @@ RUN_FORK_TESTS=true forge test --match-path 'test/fork/*'   # against live Ether
 ```
 
 Fork tests read `ETH_RPC_URL` and `BSC_RPC_URL` (defaulting to public endpoints) and exercise the real pool,
-TokenAdminRegistry, Router and token, including the full deploy-and-handover sequence. The local
+TokenAdminRegistry, Router and token, including the full deploy-and-handover sequence and the scripts' `run()` entry
+points. CI runs them in a separate job; set the `ETH_RPC_URL`/`BSC_RPC_URL` repository secrets to avoid public RPC
+rate limits. The local
 `MockLockReleaseTokenPool` reproduces the liquidity, rebalancer and rate-limit validation semantics but not the
 two-step ownership or token-bucket accounting; the fork tests are authoritative for those.
 
-Design documents are kept outside version control (`docs/`).
+Off-chain duties from the design (cross-chain reconciliation `R − I ≥ 10B`, telemetry-driven recall suspension,
+24/7 monitoring and alerting) are not part of this repository.
+
+Design documents are kept outside version control (`docs/`). Section 8 of the design draft (deployment and migration
+requirements) is referenced but not included; the migration mechanism here is a proposal pending that section.

@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
+import {Vm} from "forge-std/Vm.sol";
 
 import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 
@@ -16,6 +17,8 @@ import {ITokenAdminRegistry} from "src/interfaces/ITokenAdminRegistry.sol";
 /// @notice The calls that move existing authority from the legacy multisig to the new controls, and the Timelock
 /// batch that completes the handover and configures the Manager. Shared by `Handover` and the fork tests.
 library HandoverPlan {
+  Vm private constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+
   struct Params {
     address token;
     address tokenAdminRegistry;
@@ -44,8 +47,9 @@ library HandoverPlan {
   }
 
   /// @notice Checks, before anything is signed, that the deployment is wired as intended (the CONTROLLER, TIMELOCK,
-  /// MANAGER and ADAPTER inputs are not otherwise verified on chain against each other) and that the legacy multisig
-  /// still holds every authority the handover moves.
+  /// MANAGER and ADAPTER inputs are not otherwise verified on chain against each other), that the legacy multisig
+  /// still holds every authority the handover moves, and that the live pool matches the full PoolSpec. The legacy
+  /// multisig may itself be the Governance Safe.
   function preflight(Params memory p, address legacyMultisig, address governanceSafe) internal view {
     require(
       p.timelock.code.length != 0 && p.manager.code.length != 0 && p.controller.code.length != 0
@@ -58,7 +62,7 @@ library HandoverPlan {
     require(manager.TOKEN() == p.token, "manager token");
     require(address(manager.TOKEN_ADMIN_REGISTRY()) == p.tokenAdminRegistry, "manager registry");
     address guardian = manager.guardian();
-    require(guardian != address(0) && guardian != governanceSafe && guardian != legacyMultisig, "guardian");
+    require(guardian != address(0) && guardian != governanceSafe, "guardian");
 
     GuardianController controller = GuardianController(p.controller);
     require(address(controller.MANAGER()) == p.manager, "controller manager");
@@ -77,21 +81,24 @@ library HandoverPlan {
         && timelock.hasRole(timelock.EXECUTOR_ROLE(), governanceSafe),
       "governance roles"
     );
-    address[2] memory outsiders = [guardian, legacyMultisig];
-    for (uint256 i = 0; i < outsiders.length; ++i) {
-      require(
-        !timelock.hasRole(timelock.PROPOSER_ROLE(), outsiders[i])
-          && !timelock.hasRole(timelock.EXECUTOR_ROLE(), outsiders[i])
-          && !timelock.hasRole(timelock.CANCELLER_ROLE(), outsiders[i]),
-        "unexpected timelock role"
-      );
-    }
+    // Roles follow duties: the Guardian never holds a Timelock role; the legacy multisig holds none unless it is
+    // also the Governance Safe.
+    _requireNoTimelockRole(timelock, guardian);
+    if (legacyMultisig != governanceSafe) _requireNoTimelockRole(timelock, legacyMultisig);
 
     ILockReleaseTokenPool pool = ILockReleaseTokenPool(p.pool);
     require(pool.owner() == legacyMultisig, "pool owner is not the legacy multisig");
     require(pool.getToken() == p.token, "pool token");
     require(keccak256(bytes(pool.typeAndVersion())) == keccak256(bytes(p.spec.typeAndVersion)), "pool version");
     require(pool.getRouter() == p.spec.router, "pool router");
+    uint64 selector = p.spec.remoteChainSelector;
+    uint64[] memory chains = pool.getSupportedChains();
+    require(chains.length == 1 && chains[0] == selector, "pool chains");
+    require(keccak256(pool.getRemoteToken(selector)) == keccak256(p.spec.remoteToken), "pool remote token");
+    require(pool.getRemotePools(selector).length == p.spec.remotePools.length, "pool remote pools");
+    for (uint256 i = 0; i < p.spec.remotePools.length; ++i) {
+      require(pool.isRemotePool(selector, p.spec.remotePools[i]), "pool remote pools");
+    }
     ITokenAdminRegistry.TokenConfig memory config = ITokenAdminRegistry(p.tokenAdminRegistry).getTokenConfig(p.token);
     require(config.administrator == legacyMultisig && config.pendingAdministrator == address(0), "registry admin");
     require(config.tokenPool == p.pool, "registry pool");
@@ -107,6 +114,59 @@ library HandoverPlan {
       p.thresholds.minimum <= p.thresholds.refillTrigger && p.thresholds.refillTrigger <= p.thresholds.refillTarget,
       "thresholds"
     );
+  }
+
+  /// @notice Runs the whole handover against the current state and reverts the state afterwards: the legacy multisig
+  /// calls, then the Timelock batch scheduled and executed by the Governance Safe after the delay. Requires the same
+  /// end state the Manager enforces (`verifyHandover`, `verifyAdapter`) plus the pool authorities, so any input that
+  /// would make the real batch revert is caught before anything is signed. Uses cheatcodes; simulation only.
+  function simulate(Params memory p, address legacyMultisig, address governanceSafe, bytes32 salt) internal {
+    uint256 snapshot = vm.snapshotState();
+
+    Call[] memory calls = legacyMultisigCalls(p);
+    for (uint256 i = 0; i < calls.length; ++i) {
+      vm.prank(legacyMultisig);
+      (bool success, bytes memory returnData) = calls[i].target.call(calls[i].data);
+      _bubble(success, returnData);
+    }
+
+    TimelockController timelock = TimelockController(payable(p.timelock));
+    (address[] memory targets, uint256[] memory values, bytes[] memory payloads) = timelockBatch(p);
+    uint256 delay = timelock.getMinDelay();
+    vm.prank(governanceSafe);
+    timelock.scheduleBatch(targets, values, payloads, bytes32(0), salt, delay);
+    vm.warp(block.timestamp + delay);
+    vm.prank(governanceSafe);
+    timelock.executeBatch(targets, values, payloads, bytes32(0), salt);
+
+    LiquidityManager manager = LiquidityManager(p.manager);
+    manager.verifyHandover();
+    uint256 adapterId = manager.adapterIdByPool(p.pool);
+    require(adapterId != 0 && manager.getAdapter(adapterId).adapter == p.adapter, "simulated registration");
+    manager.verifyAdapter(adapterId);
+    ILockReleaseTokenPool pool = ILockReleaseTokenPool(p.pool);
+    require(
+      pool.owner() == p.timelock && pool.getRebalancer() == p.adapter && pool.getRateLimitAdmin() == p.controller,
+      "simulated pool authorities"
+    );
+    require(manager.isFundingOperator(p.fundingOperator) && manager.isRecallOperator(p.recallOperator), "operators");
+
+    vm.revertToState(snapshot);
+  }
+
+  function _requireNoTimelockRole(TimelockController timelock, address account) private view {
+    require(
+      !timelock.hasRole(timelock.PROPOSER_ROLE(), account) && !timelock.hasRole(timelock.EXECUTOR_ROLE(), account)
+        && !timelock.hasRole(timelock.CANCELLER_ROLE(), account),
+      "unexpected timelock role"
+    );
+  }
+
+  function _bubble(bool success, bytes memory returnData) private pure {
+    if (success) return;
+    assembly {
+      revert(add(returnData, 32), mload(returnData))
+    }
   }
 
   /// @notice Calls the legacy multisig (current pool owner, registry administrator and token owner) makes, ideally
@@ -169,9 +229,9 @@ library HandoverPlan {
   }
 }
 
-/// @notice Runs `HandoverPlan.preflight` against live state, then prints the legacy multisig calls and the Governance
-/// Safe's `scheduleBatch`/`executeBatch` calldata for the handover. Read-only; nothing is broadcast. Run it before the
-/// legacy multisig signs anything.
+/// @notice Runs `HandoverPlan.preflight` and `HandoverPlan.simulate` against live state, then prints the legacy
+/// multisig calls and the Governance Safe's `scheduleBatch`/`executeBatch` calldata for the handover. Nothing is
+/// broadcast. Run it before the legacy multisig signs anything.
 /// @dev Env: LEGACY_MULTISIG, GOVERNANCE_SAFE, TOKEN, TOKEN_ADMIN_REGISTRY, POOL, TIMELOCK, MANAGER, CONTROLLER,
 /// ADAPTER, FUNDING_OPERATOR,
 /// RECALL_OPERATOR, ROUTER, REMOTE_CHAIN_SELECTOR, REMOTE_TOKEN, REMOTE_POOL, POOL_MINIMUM, REFILL_TRIGGER,
@@ -179,9 +239,13 @@ library HandoverPlan {
 /// POOL_FUNDING_RATE, MAX_RECALL_PER_CALL, RECALL_CAPACITY, RECALL_RATE; optional POOL_TYPE_AND_VERSION
 /// (default "LockReleaseTokenPool 1.6.3-dev") and SALT (default 0).
 contract Handover is Script {
-  function run() external view {
+  function run() external {
     HandoverPlan.Params memory p = params();
-    HandoverPlan.preflight(p, vm.envAddress("LEGACY_MULTISIG"), vm.envAddress("GOVERNANCE_SAFE"));
+    address legacyMultisig = vm.envAddress("LEGACY_MULTISIG");
+    address governanceSafe = vm.envAddress("GOVERNANCE_SAFE");
+    HandoverPlan.preflight(p, legacyMultisig, governanceSafe);
+    HandoverPlan.simulate(p, legacyMultisig, governanceSafe, vm.envOr("SALT", bytes32(0)));
+    console2.log("Preflight and handover simulation passed.");
 
     console2.log("== Legacy multisig calls (in order, one MultiSend) ==");
     HandoverPlan.Call[] memory calls = HandoverPlan.legacyMultisigCalls(p);

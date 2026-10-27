@@ -846,44 +846,65 @@ contract RecallAdminRegressionTest is RecallAdminBase {
     assertTrue(manager.isRecallOperator(next));
   }
 
-  /// @dev Documents an accepted gap: `setGuardian` is deliberately unconditional (so the recovery path cannot be
-  /// blocked), so it accepts an address that already holds an operator role. Existing roles are kept; only re-grants
-  /// are rejected, and the owner must revoke the role separately to restore the separation.
-  function test_regression_setGuardian_acceptsOperatorAddress() public {
+  /// @dev `setGuardian` never reverts (so the recovery path cannot be blocked), but it revokes any operator role the
+  /// new Guardian holds, emitting the role events, so the Guardian and operator roles never overlap.
+  function test_regression_setGuardian_revokesOperatorRolesOfNewGuardian() public {
     // Such a rotation is still the protected path the Guardian cannot cancel.
     bytes memory rotate = abi.encodeCall(LiquidityManager.setGuardian, (fundingOperator));
     assertTrue(controller.isProtectedCall(address(manager), 0, rotate), "protected path");
 
     vm.expectEmit(true, true, true, true, address(manager));
     emit ILiquidityManager.GuardianSet(guardian, fundingOperator);
+    vm.expectEmit(true, true, true, true, address(manager));
+    emit ILiquidityManager.FundingOperatorSet(fundingOperator, false);
     vm.prank(address(timelock));
     manager.setGuardian(fundingOperator);
     assertEq(manager.guardian(), fundingOperator);
-    assertTrue(manager.isFundingOperator(fundingOperator), "operator role kept");
+    assertFalse(manager.isFundingOperator(fundingOperator), "funding role revoked");
 
-    // The overlapping key holds both powers.
+    // The new Guardian can restrict but no longer fund.
+    vm.expectRevert(abi.encodeWithSelector(ILiquidityManager.CallerNotFundingOperator.selector, fundingOperator));
     _fund(AMOUNT);
     vm.prank(fundingOperator);
     manager.pauseFunding();
     assertTrue(manager.fundingPaused());
 
-    vm.startPrank(address(timelock));
+    // The role cannot be granted back while it is the Guardian.
     vm.expectRevert(abi.encodeWithSelector(ILiquidityManager.OperatorCannotBeGuardian.selector, fundingOperator));
+    vm.prank(address(timelock));
     manager.setFundingOperator(fundingOperator, true);
-    manager.setFundingOperator(fundingOperator, false);
-    vm.stopPrank();
-    assertFalse(manager.isFundingOperator(fundingOperator));
-    assertEq(manager.guardian(), fundingOperator);
+
+    // Same for a Recall Operator.
+    vm.expectEmit(true, true, true, true, address(manager));
+    emit ILiquidityManager.RecallOperatorSet(recallOperator, false);
+    vm.prank(address(timelock));
+    manager.setGuardian(recallOperator);
+    assertFalse(manager.isRecallOperator(recallOperator), "recall role revoked");
+    vm.expectRevert(abi.encodeWithSelector(ILiquidityManager.CallerNotRecallOperator.selector, recallOperator));
+    _recall(AMOUNT);
   }
 
-  /// @dev With a Recall Operator as Guardian: role separation is checked before the Guardian exclusion.
-  function test_regression_operatorSetters_roleSeparationCheckedFirst() public {
+  /// @dev Removing the Guardian (address(0)) or appointing a non-operator touches no operator role.
+  function test_regression_setGuardian_leavesOtherOperatorsUntouched() public {
+    vm.recordLogs();
+    vm.prank(address(timelock));
+    manager.setGuardian(address(0));
+    assertEq(vm.getRecordedLogs().length, 1, "only GuardianSet");
+    assertTrue(manager.isFundingOperator(fundingOperator));
+    assertTrue(manager.isRecallOperator(recallOperator));
+  }
+
+  /// @dev Appointing an operator as Guardian revokes its role, so the operator setters only ever see the
+  /// Guardian check for it.
+  function test_regression_operatorSetters_guardianNeverRegainsOperatorRole() public {
     vm.startPrank(address(timelock));
     manager.setGuardian(recallOperator);
-    vm.expectRevert(abi.encodeWithSelector(ILiquidityManager.OperatorRolesMustBeSeparate.selector, recallOperator));
+    assertFalse(manager.isRecallOperator(recallOperator));
+    vm.expectRevert(abi.encodeWithSelector(ILiquidityManager.OperatorCannotBeGuardian.selector, recallOperator));
     manager.setFundingOperator(recallOperator, true);
     vm.expectRevert(abi.encodeWithSelector(ILiquidityManager.OperatorCannotBeGuardian.selector, recallOperator));
     manager.setRecallOperator(recallOperator, true);
+    // Revoking stays possible.
     manager.setRecallOperator(recallOperator, false);
     vm.stopPrank();
     assertFalse(manager.isRecallOperator(recallOperator));

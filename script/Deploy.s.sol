@@ -100,7 +100,7 @@ contract Deploy is Script {
   /// pending-nonce check is best effort (some RPCs report the latest nonce as pending); a fresh deployer and `--slow`
   /// are the actual protection.
   function _preflight(address deployer, Config memory config) internal {
-    require(_pendingNonce(deployer) == vm.getNonce(deployer), "deployer has pending transactions");
+    require(_rpcNonce(deployer, "pending") == _rpcNonce(deployer, "latest"), "deployer has pending transactions");
     require(config.guardianSafe != address(0), "no Guardian");
     require(config.governanceSafe.code.length != 0, "Governance Safe has no code");
     require(config.guardianSafe.code.length != 0, "Guardian Safe has no code");
@@ -153,8 +153,9 @@ contract Deploy is Script {
     require(d.adapter.POOL() == config.pool, "adapter pool");
   }
 
-  function _pendingNonce(address account) internal returns (uint256 nonce) {
-    bytes memory raw = vm.rpc("eth_getTransactionCount", string.concat('["', vm.toString(account), '","pending"]'));
+  function _rpcNonce(address account, string memory blockTag) internal returns (uint256 nonce) {
+    bytes memory raw =
+      vm.rpc("eth_getTransactionCount", string.concat('["', vm.toString(account), '","', blockTag, '"]'));
     for (uint256 i = 0; i < raw.length; ++i) {
       nonce = (nonce << 8) | uint8(raw[i]);
     }

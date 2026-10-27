@@ -1599,6 +1599,12 @@ abstract contract ForkLiquidityBase is Test {
     // registry administrator; the token (OZ single-step Ownable) moves at once.
     HandoverPlan.Params memory p = _handoverParams();
     HandoverPlan.preflight(p, POOL_OWNER, governanceSafe);
+    // The full handover simulation passes and leaves no trace.
+    HandoverPlan.simulate(p, POOL_OWNER, governanceSafe, keccak256("handover"));
+    assertEq(pool.owner(), POOL_OWNER, "simulation reverted");
+    assertEq(pool.getRebalancer(), PREVIOUS_REBALANCER, "simulation reverted");
+    assertEq(token.owner(), POOL_OWNER, "simulation reverted");
+    assertEq(manager.adapterCount(), 0, "simulation reverted");
 
     // The preflight rejects a controller that is not wired to this deployment (here: one from another deployment)
     // and a rate limit admin that is not the controller.
@@ -1623,6 +1629,24 @@ abstract contract ForkLiquidityBase is Test {
     wrong.spec.rateLimitAdmin = guardian;
     vm.expectRevert(bytes("rateLimitAdmin must be the controller"));
     this.externalPreflight(wrong);
+
+    // A wrong cross-chain configuration is caught by the preflight, and independently by the simulation, before the
+    // legacy multisig hands over the (single-step) token ownership.
+    wrong = _handoverParams();
+    wrong.spec.remoteToken = abi.encode(address(0xBAD));
+    vm.expectRevert(bytes("pool remote token"));
+    this.externalPreflight(wrong);
+    vm.expectRevert(abi.encodeWithSelector(ILiquidityManager.PoolRemoteTokenMismatch.selector, POOL));
+    this.externalSimulate(wrong);
+    wrong = _handoverParams();
+    wrong.spec.remoteChainSelector = 1;
+    vm.expectRevert(bytes("pool chains"));
+    this.externalPreflight(wrong);
+    wrong = _handoverParams();
+    wrong.spec.remotePools[0] = abi.encode(address(0xBAD));
+    vm.expectRevert(bytes("pool remote pools"));
+    this.externalPreflight(wrong);
+    assertEq(token.owner(), POOL_OWNER, "nothing moved");
 
     _executeLegacyMultisigCalls(p);
 
@@ -1942,6 +1966,45 @@ abstract contract ForkLiquidityBase is Test {
   /// @dev Handover parameters for the current stack variables, with the fixture's operating parameters.
   function externalPreflight(HandoverPlan.Params memory p) external view {
     HandoverPlan.preflight(p, POOL_OWNER, governanceSafe);
+  }
+
+  function externalSimulate(HandoverPlan.Params memory p) external {
+    HandoverPlan.simulate(p, POOL_OWNER, governanceSafe, keccak256("handover"));
+  }
+
+  /// @dev The legacy multisig may stay on as the Governance Safe: roles are checked by duty, so the preflight and the
+  /// simulation pass, and the real handover completes with it as proposer and executor.
+  function test_regression_fork_legacyMultisigAsGovernanceSafe() public {
+    vm.revertToState(liveSnapshot);
+    governanceSafe = POOL_OWNER;
+    Deploy.Deployment memory d = _deployWithScript();
+    timelock = d.timelock;
+    manager = d.manager;
+    controller = d.controller;
+    adapter = d.adapter;
+    assertTrue(timelock.hasRole(timelock.PROPOSER_ROLE(), POOL_OWNER));
+    assertTrue(timelock.hasRole(timelock.EXECUTOR_ROLE(), POOL_OWNER));
+
+    HandoverPlan.Params memory p = _handoverParams();
+    HandoverPlan.preflight(p, POOL_OWNER, POOL_OWNER);
+    HandoverPlan.simulate(p, POOL_OWNER, POOL_OWNER, keccak256("handover"));
+
+    _executeLegacyMultisigCalls(p);
+    (address[] memory targets, uint256[] memory values, bytes[] memory payloads) = HandoverPlan.timelockBatch(p);
+    uint256 delay = timelock.getMinDelay();
+    vm.prank(POOL_OWNER);
+    timelock.scheduleBatch(targets, values, payloads, bytes32(0), keccak256("handover"), delay);
+    vm.warp(block.timestamp + delay);
+    vm.prank(POOL_OWNER);
+    timelock.executeBatch(targets, values, payloads, bytes32(0), keccak256("handover"));
+
+    manager.verifyHandover();
+    adapterId = manager.adapterIdByPool(POOL);
+    manager.verifyAdapter(adapterId);
+    deal(SAHARA, address(manager), 1e24);
+    uint256 poolBefore = _balance(POOL);
+    _fund(1e24);
+    assertEq(_balance(POOL), poolBefore + 1e24);
   }
 
   function _one(address account) internal pure returns (address[] memory accounts) {

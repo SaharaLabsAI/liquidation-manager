@@ -38,3 +38,27 @@ jobs:
         run: |
           forge test -vvv
         id: test
+
+  fork:
+    name: Fork tests (Ethereum and BSC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Run fork tests
+        env:
+          # The fork suites cap their own fuzz runs under the default profile; keep RPC load low.
+          FOUNDRY_PROFILE: default
+          RUN_FORK_TESTS: "true"
+          ETH_RPC_SECRET: ${{ secrets.ETH_RPC_URL }}
+          BSC_RPC_SECRET: ${{ secrets.BSC_RPC_URL }}
+        run: |
+          export ETH_RPC_URL="${ETH_RPC_SECRET:-https://ethereum-rpc.publicnode.com}"
+          export BSC_RPC_URL="${BSC_RPC_SECRET:-https://bsc-dataseed.bnbchain.org}"
+          forge test --match-path 'test/fork/*' -vvv
+          forge test --match-path 'test/controller-timelock/ForkLockdown.t.sol' -vvv

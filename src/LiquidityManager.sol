@@ -234,10 +234,19 @@ contract LiquidityManager is ILiquidityManager, Ownable2Step, ReentrancyGuard {
   // ================================================================
 
   /// @inheritdoc ILiquidityManager
-  /// @dev Deliberately free of pause and guardian-controlled checks so recovery always executes.
+  /// @dev Deliberately free of pause and guardian-controlled checks and of any revert path, so recovery always
+  /// executes. Operator roles held by the new Guardian are revoked rather than rejected, keeping the roles separate.
   function setGuardian(address newGuardian) external onlyOwner {
     emit GuardianSet(guardian, newGuardian);
     guardian = newGuardian;
+    if (isFundingOperator[newGuardian]) {
+      isFundingOperator[newGuardian] = false;
+      emit FundingOperatorSet(newGuardian, false);
+    }
+    if (isRecallOperator[newGuardian]) {
+      isRecallOperator[newGuardian] = false;
+      emit RecallOperatorSet(newGuardian, false);
+    }
   }
 
   /// @notice Grants or revokes the Funding Operator role. Operator roles are mutually exclusive and cannot be granted
