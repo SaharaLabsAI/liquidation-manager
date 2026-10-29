@@ -1,0 +1,5 @@
+node_modules
+state
+test
+config.yaml
+.env

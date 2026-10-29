@@ -1,0 +1,188 @@
+# SAHARA liquidity monitor configuration. Copy to config.yaml and fill in.
+# Strings may use ${ENV_VAR} or ${ENV_VAR:-default}; keep secrets (bot token, RPC URLs with API keys) in the
+# environment. Token amounts are whole tokens ("10000000000" = 10 billion SAHARA). Addresses may be given in any case.
+#
+# Expected-state entries (`expected`) accept an address or an alias resolved against the live deployment:
+#   timelock (Manager owner), manager, controller (GuardianController), adapter (the adapter registered for the pool),
+#   governanceSafe (expected.governanceSafe), zero.
+# With `contracts.manager` set, tokenOwner / poolOwner / registryAdmin default to "timelock", rebalancer to "adapter"
+# and rateLimitAdmin to "controller". Before the handover, set them to the legacy multisig instead (see README).
+
+logLevel: info
+stateFile: ./state/state.json
+
+http:
+  port: 9464 # GET /healthz, GET /metrics; the Docker HEALTHCHECK expects 9464 (0 = any free port)
+
+token:
+  symbol: SAHARA
+  decimals: 18
+
+alerts:
+  reminderSec: # re-send open conditions; 0 = never
+    critical: 3600
+    high: 14400
+    warning: 43200
+    info: 0
+  dailySummaryUtc: "01:00" # 09:00 UTC+8
+  # Dead-man's switch (e.g. healthchecks.io); empty = disabled. Pinged every 60 s only while every chain is caught up
+  # and fresh, reconciliation is not blocked for longer than reconciliation.staleAfterSec and no alert route is failing
+  # (kept across a restart), so it also fires while a Telegram route cannot take its alerts (they are kept and retried)
+  # or a first-start backfill runs long.
+  heartbeatUrl: ${HEARTBEAT_URL:-}
+
+telegram:
+  botToken: ${TELEGRAM_BOT_TOKEN}
+  # Each route delivers on its own: a route Telegram refuses (bot removed, no rights, chat migrated) keeps its alerts,
+  # retries them with backoff and fails /healthz until it delivers again; the other routes go on. Changing a route's
+  # chatId or threadId hands its undelivered alerts to the new chat at the next start (README "When Telegram fails").
+  routes:
+    # Channel: add the bot as an administrator with "Post messages". Use "@channelname" or the numeric "-100…" id.
+    - chatId: ${TELEGRAM_CHANNEL_ID}
+      minSeverity: info
+    # Optional on-call group (or a forum topic in it) for high/critical only, with mentions on critical.
+    # - chatId: "-1001234567890"
+    #   threadId: 42
+    #   minSeverity: high
+    #   mention: "@oncall_primary @oncall_secondary"
+
+# Before the first run, list every wallet that holds SAHARA reserves in chains.<chain>.reserves.legacyWallets (or
+# extraEndpoints). R counts only the Manager, adapters, watched pools and those lists: with the lists empty, R is just
+# the pool balances and reconcile.backing reports a false critical breach (README, Quick start). If the wallets are not
+# known yet, set enabled: false until they are; that also disables reconcile.failed-messages, .stuck-message and
+# .total-supply (ccip.message-failed events still fire).
+reconciliation:
+  enabled: true
+  requiredBacking: "10000000000" # R − I must stay ≥ one chain's total supply
+  intervalSec: 300
+  # Runs blocked for longer than this (they threw, or a chain was unreachable at its finalized block, CCIP tracking had
+  # not started or a CCIP scan was behind) raise health.reconcile-stale (high, critical after 3x), fail /healthz and
+  # withhold the heartbeat; ccip.enabled: false and CCIP gaps still replaying do not count. Default 3 x intervalSec
+  # (900 s); at least 2 x intervalSec, since one blocked run followed by a good one is blocked for intervalSec plus
+  # both runs' durations (RPC timeouts can stretch a run to minutes). The chains' staleAfterSec does not apply here.
+  # staleAfterSec: 900
+  # Obligations the monitor can never see settle, once checked in the CCIP explorer: no longer counted in I (README
+  # "Acknowledged obligations"). By txHash (chain of the transaction): a lock without a matching CCIP message, or a
+  # bridge transaction whose receipt cannot be fetched. By messageId (chain it was sent from): a message to a chain
+  # selector that is not configured. Exactly one of txHash / messageId (32-byte hex). Pending or failed messages to
+  # configured chains, and gaps, cannot be acknowledged; an entry that matches nothing is ignored.
+  # acknowledged:
+  #   - chain: ethereum
+  #     txHash: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  #     note: "released on bsc, checked in the CCIP explorer on 2026-10-28"
+  #   - chain: bsc
+  #     messageId: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  #     note: "executed on the destination, checked in the CCIP explorer on 2026-10-28"
+
+chains:
+  ethereum:
+    chainId: 1
+    chainSelector: "5009297550715157269"
+    rpcUrls: ["${ETH_RPC_URL}"] # must serve eth_getLogs over maxLogRange blocks (public endpoints usually do not)
+    explorerUrl: https://etherscan.io
+    confirmations: 3
+    pollIntervalSec: 12
+    maxLogRange: 500 # raise if the provider allows (paid RPCs usually allow 2000+); failing ranges are split
+    # First block scanned on a fresh state file; default: the confirmed head at first start. The Timelock and CCIP
+    # history from here is backfilled muted on the first start, and the chain is unmonitored (stale telemetry, /healthz
+    # 503, no heartbeat) until that completes: see README "startBlock and the state file". 0 is a placeholder only.
+    # startBlock: 0
+    # Stale (high, critical after 3x) when not caught up, or the confirmed head has not risen, for this long; the same
+    # limit applies to failing state reads and to the replay of skipped CCIP blocks (reconciliation has its own
+    # reconciliation.staleAfterSec). Keep it well above the RPC worst case per request:
+    # len(rpcUrls) x (rpcRetryCount + 1) x rpcTimeoutMs (60 s per URL).
+    staleAfterSec: 300
+    contracts:
+      token: "0xFDFfB411C4A70AA7C95D5C981a6Fb4Da867e1111"
+      registry: "0xb22764f98dD05c789929716D677382Df22C05Cb6"
+      router: "0x80226fc0Ee2b096224EeAc085Bb9a8cba1146f7D"
+      pool: "0x194E4C58DED42b35ed984C8e8F85E854bD1e62B4"
+      manager: ${ETH_MANAGER:-}
+      timelock: ${ETH_TIMELOCK:-}
+      controller: ${ETH_CONTROLLER:-}
+    reserves:
+      # REQUIRED before the first run: every wallet holding SAHARA reserves on this chain, kept until migrated to the
+      # Manager (flow-monitored and counted in R). Empty = only the pool counts, and reconcile.backing fires.
+      legacyWallets: []
+      extraPools: [] # retired or replacement pools still holding inventory or obligations
+      extraEndpoints: [] # any other reserve address (counted in R, flow-monitored)
+    expected:
+      governanceSafe: ${ETH_GOVERNANCE_SAFE:-}
+      guardian: ${ETH_GUARDIAN_SAFE:-}
+      fundingOperators: ["${ETH_FUNDING_OPERATOR:-}"]
+      recallOperators: ["${ETH_RECALL_OPERATOR:-}"]
+      timelockDelaySec: 259200 # 72 hours
+      timelockRoles:
+        admins: [timelock]
+        proposers: [governanceSafe]
+        executors: [governanceSafe]
+        cancellers: [governanceSafe, controller]
+      tokenPaused: false
+      # onRamp / offRamps: Chainlink-managed; pin them to be alerted when the lane is upgraded.
+      onRamp: "0xc3423F3FB30857D9C14717b119884b1B63d250b7"
+      offRamps:
+        - "0x7Afe7088aff57173565F4b034167643AA8b9171c"
+        - "0x66d84fedED0e51aeB47ceD1BB2fc0221Ae8D7C12"
+        - "0x408428bca0e24A25ac8baAc1b70f64AF257717c3"
+      rateLimits:
+        outbound: {enabled: true, capacity: "300000000", rate: "3500"}
+        inbound: {enabled: true, capacity: "300000000", rate: "3500"}
+    limits:
+      budgetLowPct: 20
+      largeTransfer: "10000000"
+      outflowWindowSec: 3600
+      outflowWindowAmount: "30000000"
+    ccip:
+      # false makes reconciliation INCOMPLETE; blocks passed while off are a gap, replayed muted once it is back on
+      enabled: true
+      stuckAfterSec: 7200
+
+  bsc:
+    chainId: 56
+    chainSelector: "11344663589394136015"
+    rpcUrls: ["${BSC_RPC_URL}"]
+    explorerUrl: https://bscscan.com
+    confirmations: 5
+    pollIntervalSec: 6
+    maxLogRange: 500 # raise if the provider allows (paid RPCs usually allow 2000+); failing ranges are split
+    staleAfterSec: 180 # see ethereum
+    contracts:
+      token: "0xFDFfB411C4A70AA7C95D5C981a6Fb4Da867e1111"
+      registry: "0x736Fd8660c443547a85e4Eaf70A49C1b7Bb008fc"
+      router: "0x34B03Cb9086d7D758AC55af71584F81A598759FE"
+      pool: "0x194E4C58DED42b35ed984C8e8F85E854bD1e62B4"
+      manager: ${BSC_MANAGER:-}
+      timelock: ${BSC_TIMELOCK:-}
+      controller: ${BSC_CONTROLLER:-}
+    reserves:
+      legacyWallets: [] # REQUIRED before the first run: see ethereum
+      extraPools: []
+      extraEndpoints: []
+    expected:
+      governanceSafe: ${BSC_GOVERNANCE_SAFE:-}
+      guardian: ${BSC_GUARDIAN_SAFE:-}
+      fundingOperators: ["${BSC_FUNDING_OPERATOR:-}"]
+      recallOperators: ["${BSC_RECALL_OPERATOR:-}"]
+      timelockDelaySec: 259200
+      timelockRoles:
+        admins: [timelock]
+        proposers: [governanceSafe]
+        executors: [governanceSafe]
+        cancellers: [governanceSafe, controller]
+      tokenPaused: false
+      onRamp: "0x84a0797B31Ac0d3E1D06157663dd4b18cFFdA188"
+      offRamps:
+        - "0x181Bb1E97b0bDD1D85E741ad0943552D3682cc35"
+        - "0xF616733641D420207b8F30db9C4cE39684768991"
+        - "0x4914044f8d787bd5DC7528f00775D850dC54477e"
+      rateLimits:
+        outbound: {enabled: true, capacity: "300000000", rate: "3500"}
+        inbound: {enabled: true, capacity: "300000000", rate: "3500"}
+    limits:
+      budgetLowPct: 20
+      largeTransfer: "10000000"
+      outflowWindowSec: 3600
+      outflowWindowAmount: "30000000"
+    ccip:
+      enabled: true
+      stuckAfterSec: 7200
