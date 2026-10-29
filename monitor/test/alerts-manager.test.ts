@@ -694,7 +694,8 @@ async function interleave(seed: number): Promise<{emitted: string[]; sinks: Slow
   return {emitted, sinks, snapshots};
 }
 
-describe("AlertManager outbox (random interleavings)", () => {
+// A restart from every save of 40 seeds (about a thousand): some 3 s locally and twice that on a CI runner.
+describe("AlertManager outbox (random interleavings)", {timeout: 30_000}, () => {
   it("loses, reorders or repeats nothing at any save: a restart re-sends only what was not delivered", async () => {
     let checked = 0;
     let undelivered = 0;
