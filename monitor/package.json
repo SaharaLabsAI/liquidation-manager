@@ -1,0 +1,30 @@
+{
+  "name": "sahara-liquidity-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only monitoring and Telegram alerting for the SAHARA LiquidityManager deployments (Ethereum and BSC).",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/cli.ts run",
+    "check": "node src/cli.ts check",
+    "test-alert": "node src/cli.ts test-alert",
+    "gen:abi": "node scripts/gen-abi.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts"
+  },
+  "dependencies": {
+    "viem": "2.57.12",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "5.9.3",
+    "vitest": "5.0.5"
+  }
+}

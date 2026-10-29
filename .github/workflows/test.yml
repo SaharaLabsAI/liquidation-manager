@@ -42,6 +42,47 @@ jobs:
           forge test -vvv
         id: test
 
+  monitor:
+    name: Monitor (TypeScript)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: monitor
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pinned: `stable` drifts, and newer forge fmt releases reformat the code.
+          version: v1.2.3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: monitor/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check generated ABIs match the contracts
+        run: |
+          forge build --root ..
+          npm run gen:abi
+          git diff --exit-code src/abi/generated.ts
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: End-to-end tests (anvil)
+        run: npm run test:e2e
+
   fork:
     name: Fork tests (Ethereum and BSC)
     runs-on: ubuntu-latest

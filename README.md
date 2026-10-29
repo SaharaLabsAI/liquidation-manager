@@ -155,7 +155,10 @@ prints the calls for the handover (`HandoverPlan`):
    that reverts stays scheduled and can be executed once the legacy calls are in. Before execution, the legacy
    multisig can abort by proposing `address(0)` as pool owner and registry administrator; returning the token needs a
    Timelock operation.
-3. Move legacy reserves into the Manager with plain transfers.
+3. Move legacy reserves into the Manager with plain transfers. The monitor counts reserves in `R` only at the
+   addresses it knows, so list every reserve wallet in its `reserves.legacyWallets` from its first run and keep each
+   one there until it is empty (see the monitor's
+   [handover notes](monitor/README.md#before-during-and-after-the-handover)).
 
 Operating parameters (pool minimum/trigger/target, funding and recall limits, budgets) are still TBD per the design
 document and are passed to `Handover` through the environment.
@@ -193,7 +196,8 @@ document and are passed to `Handover` through the environment.
 - Monitor: Manager, adapter and pool balances and inflows, `Funded`/`Recalled`, `GuardianAction` and every
   configuration event, Timelock `CallScheduled`/`Cancelled`/`MinDelayChange` and role events, pool owner, rebalancer,
   `rateLimitAdmin`, Router, remote configuration and rate limits, registry mapping and administrator, token owner and
-  `paused()`.
+  `paused()`. The read-only monitor in [`monitor/`](monitor/README.md) covers all of these; its
+  [rule catalog](monitor/README.md#rule-catalog) lists every alert with its severity and first response.
 
 ## Development
 
@@ -210,8 +214,10 @@ rate limits. The local
 `MockLockReleaseTokenPool` reproduces the liquidity, rebalancer and rate-limit validation semantics but not the
 two-step ownership or token-bucket accounting; the fork tests are authoritative for those.
 
-Off-chain duties from the design (cross-chain reconciliation `R − I ≥ 10B`, telemetry-driven recall suspension,
-24/7 monitoring and alerting) are not part of this repository.
+The off-chain duties from the design (cross-chain reconciliation `R − I ≥ 10B`, stale-telemetry alerts for recall
+suspension, 24/7 monitoring and Telegram alerting) are implemented by the read-only monitor in
+[`monitor/`](monitor/README.md). It holds no keys and only alerts; recall suspension and every other response is a
+Guardian or Timelock action.
 
 Design documents are kept outside version control (`docs/`). Section 8 of the design draft (deployment and migration
 requirements) is referenced but not included; the migration mechanism here is a proposal pending that section.
