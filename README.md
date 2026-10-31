@@ -165,6 +165,9 @@ document and are passed to `Handover` through the environment.
 
 ### Runbook notes
 
+Incident procedures, every lever and every way to get reserves out of the Manager, the adapter and the pool are in
+[`EMERGENCY.md`](EMERGENCY.md), rehearsed end to end on Sepolia ⇄ BSC testnet by [`script/testnet/`](script/testnet/README.md).
+
 - Schedule a Guardian recovery as exactly `abi.encodeCall(LiquidityManager.setGuardian, (newGuardian))`, value 0,
   **predecessor `bytes32(0)`**, single operation, and check `GuardianController.isProtectedCall` first. A recovery
   with a predecessor can be stalled by cancelling the predecessor; padded calldata is not protected.
