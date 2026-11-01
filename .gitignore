@@ -11,5 +11,7 @@ script/testnet/deployments/*.fork.*
 script/testnet/deployments/fork-broadcast/
 script/testnet/deployments/*.out
 script/testnet/deployments/*.log
+script/testnet/deployments/*.pid
+script/testnet/deployments/rpc-fault-rules.json
 broadcast/*/11155111/
 broadcast/*/97/

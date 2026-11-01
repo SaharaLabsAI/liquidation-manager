@@ -365,3 +365,89 @@ Sepolia**, 91 transactions on each chain. The testnet stacks are left operationa
 | 11-extra | X4 Owner-held delayed brakes: delist the token in the registry and zero the rebalancer, then restore | lmtest-governance | [0x53a3980890…](https://sepolia.etherscan.io/tx/0x53a39808909995d50b7d2bda34db7e002b4218093fed0e392dee3667c7b7f2fc) |
 
 </details>
+
+## Monitor alert test
+
+The read-only monitor ([`monitor/`](../../monitor)) was tested against this deployment on 2026-10-31 and 2026-11-01
+with [`monitor/config.yaml`](monitor/config.yaml): MTK in place of SAHARA, the deployer as the legacy reserve wallet,
+`requiredBacking` = one chain's supply (1,000,000), the drill's 120 s delay and rate limits, and a Telegram route to a
+test group (`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHANNEL_ID` in `monitor/.env`). The on-chain, fault and config tests ran
+with alerts on stdout before the Telegram route was added; the delivery tests ran against Telegram.
+
+```sh
+cd monitor
+node --env-file=.env src/cli.ts check --config ../script/testnet/monitor/config.yaml     # one-shot report
+node --env-file=.env src/cli.ts scan --config ../script/testnet/monitor/config.yaml --chain bsc-testnet \
+  --from <block> --to <block>
+cd ../script/testnet/monitor
+CHAIN=bsc bash -c 'source ../drill/lib.sh; source lib.sh; mon_start'       # daemon; JSON logs in deployments/monitor.log
+CHAIN=bsc ./live-test.sh brakes predecessor guardian limits skew ratelimits inflow
+CHAIN=bsc ./live-test.sh ccip-send && CHAIN=bsc ./live-test.sh ccip-wait   # per sending chain
+CHAIN=bsc ./fault-test.sh reads outage      # daemon's BSC RPC behind rpc-fault-proxy.mjs (see the script header)
+CHAIN=bsc ./config-flip-test.sh
+CHAIN=bsc ./telegram-test.sh route outage
+```
+
+Every live scenario schedules its restore operation before the change executes; if an expectation fails, the exit
+trap executes the restore (or cancels both when the change never ran). `FAIL_AT=<scenario>-after-change` rehearses that
+path; it was rehearsed live on `brakes`.
+
+**Replay of the drill** (`scan` over each chain's drill blocks): 140 alerts on each chain, identical rule and severity
+counts. Every transaction that touches the system raised an alert; the 13 without one are gas top-ups, Safe creations,
+contract creations that emit no events, `approve(Router, 0)` and the stray-token deployment. The cancel calldata of all
+19 Guardian-cancellable proposals hashes to its operation id with the right `cancel`/`cancelBatch` selector, and both
+protected `setGuardian` proposals offer only the governance `cancel(id)`. Sepolia's publicnode RPC prunes historical
+state, so the Sepolia replay ran through an anvil fork of an archive-capable RPC.
+
+**Live daemon** (BSC testnet unless noted): every expected alert fired and every condition resolved after the restore.
+
+| Scenario | Alerts and conditions seen |
+| --- | --- |
+| `brakes` | `registry.pool`, `pool.config`; `state-registry.pool`, `state-pool.rebalancer`, `state-manager.verify-adapter` (critical), resolved |
+| `ccip-send` / `ccip-wait` (both directions, 600 MTK) | `flows.approval`, `flows.endpoint-outflow`, `flows.large-transfer` on the destination; Sepolia → BSC took about 17 min, so `reconcile.stuck-message` (600 s) opened and resolved on release |
+| `predecessor` | `timelock-queue.soon`, `.ready`, `.blocked` (protected `setGuardian` behind its predecessor); the Guardian's cancel of the predecessor raised critical `timelock.cancelled` "(stalls a pending Guardian recovery)" |
+| `guardian` | `manager.guardian-action`; six `state-manager` warnings (pauses, operators, adapter flags), resolved by one Timelock batch |
+| `limits` | `state-manager.budget-low` → `.budget-exhausted`; `state-inventory.below-minimum` (critical) → `.below-trigger` (warning), resolved |
+| `skew` | `timelock.role`, `timelock.delay`, `registry.admin`, `pool.config`; 12 critical conditions (pool spec router / version / remote token / remote pools, rateLimitAdmin, `verify-adapter`, Manager pending owner, registry pending admin, `verify-handover`, controller without `CANCELLER_ROLE`, Guardian holding it, delay), resolved |
+| `ratelimits` | `pool.rate-limits` "disabled (unlimited)"; `state-pool.rate-limit-disabled` (critical), `.rate-limit-mismatch` (high), then `controller.lockdown` and `state-pool.lockdown`, resolved |
+| `inflow` | `flows.endpoint-inflow` |
+| `fault-test.sh reads` | `state-manager.read-failed` warning → high after `staleAfterSec`; `reconcile.incomplete` "unreachable"; `health.reconcile-stale` after 6 min; `/healthz` 503 → 200 |
+| `fault-test.sh outage` | `health.stale-telemetry` high after 3 min; `/healthz` 503 → 200 |
+| `config-flip-test.sh` | `reconcile.backing`, `reconcile.total-supply` (critical), `state-router.on-ramp` (high), resolved on the original config |
+| Telegram, normal | `test-alert`, then `predecessor` again with the fixes below: 12 messages delivered, none failed |
+| `telegram-test.sh route` | A second route to a chat that does not exist fails as `route` ("400 Bad Request: chat not found"), `/healthz` 503 `delivery-failing` while the real group keeps receiving; with the route removed its kept message is dropped and `/healthz` is 200 again |
+| `telegram-test.sh outage` | API on a closed port: messages kept as `transient`, `/healthz` 503; the 21 extra-operator warnings fold into one digest. Back on the real API: the kept messages are sent again, "alert delivery recovered", the warnings resolve into the same digest (2 messages in all), outbox empty |
+
+Not covered on testnet: `ccip.message-failed` / `reconcile.failed-messages`
+(a failed message needs a manual execution to clear), `health.ccip-gap-replay`, `digest`, and the rules testnet
+cannot produce (Router ramps and owner, pool allowlist, unexplained Manager / adapter / pool outflows, adapter
+allowance, adapter dust, which is irreversible). These rely on the monitor's unit and e2e tests.
+
+### Monitor findings
+
+None changes what is detected or its severity; they are wrong or misleading text in alerts. The first seven are fixed
+in `monitor/` (with regression tests that fail on the old code); the rest are open.
+
+- **Call numbers in Timelock attribution were 0-based**: config events said "Timelock operation (call #3)" for the
+  call `timelock.executed` lists as "Call 4/12", and the first call of a batch had no number. Now "(call 4/12)".
+- **Cancel guidance after the ETA**: `timelock-queue.ready` and `.blocked` repeated "cancel … before <ETA>" when the ETA
+  had passed (seen live in `predecessor`). They now say to cancel now: OpenZeppelin cancels until execution.
+- **Wrong ETA in `controller.proposal-cancelled`** when the same id was re-scheduled in the same processed block range
+  (it showed the re-scheduled ETA). The Timelock rule now records each cancelled scheduling for it.
+- **Cancelled unprotected `setGuardian`**: the note told governance to re-propose the same operation, which the
+  Guardian can cancel again, and the critical `timelock.cancelled` had no note. Both now say to re-propose it as a
+  single protected call with predecessor 0.
+- **Durations dropped seconds**: a 120 → 121 s delay change read "Timelock delay changed: 2m -> 2m". The delay titles
+  now keep seconds ("2m 1s").
+- **`state-pool.router` title** said "Pool Router changed to Router" when the Manager's spec had changed. Now "Pool
+  Router is X, spec requires Y".
+- **`state-router` followed the Manager's spec**: a spec with a wrong remote selector also raised "Router OnRamp /
+  OffRamps changed" for that selector. Now only the configured lanes are checked, and the new `state-pool.lane`
+  reports a spec on a lane that is not configured.
+- **Read failures alert on the first failure** (observation): one transient publicnode error on a block-timestamp
+  read opened `timelock-queue.read-failed` as a warning and resolved it 7 s later, two messages for one RPC blip.
+- **Hard-coded "SAHARA"** in two titles (`Registry maps SAHARA to no pool`, `SAHARA sent directly to …`); cosmetic on
+  testnet only.
+- By design (documented): `flows.outflow-window` opens once at high and stays silent while the window keeps growing (in
+  the drill, a routine 30k recall held it open through a 130k pool drain, which `pool.liquidity` reported), and a
+  `replaceAdapter` proposal carries no reminder to check the new adapter's bytecode before the ETA.
