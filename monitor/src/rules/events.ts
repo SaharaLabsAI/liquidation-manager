@@ -38,6 +38,7 @@ import {
   sameAddress,
   txLink,
 } from "./common.ts";
+import {GUARDIAN_CHANGE_CANCELLED_NOTE, timelockCancelsNamespace, type CancelledScheduling} from "./timelock.ts";
 
 // ----------------------------------------------------------------------------------------------------------------
 // Topics and decoders
@@ -206,6 +207,8 @@ interface TimelockCall {
   index: bigint;
   target: Address;
   logIndex: number;
+  /** Number of calls of the operation executed in this transaction (the batch length). */
+  count: number;
 }
 
 /** The Timelock `CallExecuted` logs of one transaction, in log order. */
@@ -223,10 +226,13 @@ function timelockCalls(ctx: ChainContext, txLogs: readonly Log[]): TimelockCall[
         topics: log.topics,
         strict: true,
       });
-      calls.push({id: args.id, index: args.index, target: args.target, logIndex: log.logIndex ?? 0});
+      calls.push({id: args.id, index: args.index, target: args.target, logIndex: log.logIndex ?? 0, count: 0});
     } catch (error) {
       warnLog(ctx, "events: cannot decode Timelock CallExecuted", log, error);
     }
+  }
+  for (const call of calls) {
+    call.count = calls.filter((other) => other.id.toLowerCase() === call.id.toLowerCase()).length;
   }
   return calls;
 }
@@ -240,10 +246,16 @@ function timelockCallFor(calls: readonly TimelockCall[], log: Log): TimelockCall
   return calls.find((call) => call.logIndex > logIndex && sameAddress(call.target, log.address));
 }
 
-/** "Timelock operation: <id>" when a Timelock call produced `log`, else who we know it was not. */
+/**
+ * "Timelock operation: <id>" when a Timelock call produced `log`, else who we know it was not. A call of a batch is
+ * numbered from 1 with the batch length, as "Call N/M" in the timelock.scheduled and timelock.executed alerts.
+ */
 function attributionField(ctx: ChainContext, call: TimelockCall | undefined): AlertField {
   if (call) {
-    const label = call.index === 0n ? "Timelock operation" : `Timelock operation (call #${call.index})`;
+    const position = call.index + 1n;
+    let label = "Timelock operation";
+    if (call.count > 1 && BigInt(call.count) >= position) label += ` (call ${position}/${call.count})`;
+    else if (position > 1n) label += ` (call ${position})`;
     return {label, value: call.id, code: true};
   }
   if (!ctx.addresses.timelock) return {label: "Executed by", value: "unknown (Timelock address not resolved)"};
@@ -835,8 +847,35 @@ function storedTimelockOp(ctx: ChainContext, id: Hex): StoredTimelockOp | undefi
   return undefined;
 }
 
+/**
+ * The scheduling the Guardian's `ProposalCancelled` (`log`) closed, as the timelock rule recorded it: the last
+ * `Cancelled` of `id` before `log` in the same transaction.
+ */
+function storedCancel(ctx: ChainContext, txHash: Hex, log: Log, id: Hex): CancelledScheduling | undefined {
+  const cancels = ctx.store.get<Record<string, CancelledScheduling>>(timelockCancelsNamespace(ctx.name), {});
+  const prefix = `${txHash.toLowerCase()}:`;
+  const before = log.logIndex ?? Number.MAX_SAFE_INTEGER;
+  let found: CancelledScheduling | undefined;
+  let foundIndex = -1;
+  for (const [key, entry] of Object.entries(cancels)) {
+    if (!key.startsWith(prefix) || entry.id.toLowerCase() !== id.toLowerCase()) continue;
+    const index = Number(key.slice(prefix.length));
+    if (index < before && index > foundIndex) {
+      found = entry;
+      foundIndex = index;
+    }
+  }
+  return found;
+}
+
 function proposalCancelledAlert(ctx: ChainContext, txHash: Hex, log: Log, id: Hex, guardian: Address): Alert {
-  const op = storedTimelockOp(ctx, id);
+  // The op record can already hold a later scheduling of the same id from this block range: prefer what the timelock
+  // rule recorded for this cancellation.
+  const cancelled = storedCancel(ctx, txHash, log, id);
+  // Without a record the timelock rule did not track the op when it was cancelled (or the state file predates the
+  // records): the op record describes it only if it is still the cancelled one, not a later scheduling.
+  const tracked = storedTimelockOp(ctx, id);
+  const op = cancelled ?? (tracked?.status === "cancelled" ? tracked : undefined);
   const summary = typeof op?.summary === "string" ? op.summary : undefined;
   const fields: AlertField[] = [
     {label: "Operation id", value: id, code: true},
@@ -854,7 +893,9 @@ function proposalCancelledAlert(ctx: ChainContext, txHash: Hex, log: Log, id: He
     title: head ? `Guardian cancelled Timelock operation: ${head}` : "Guardian cancelled a Timelock operation",
     fields,
     links: [txLink(ctx, txHash)],
-    note: "If this was not an agreed cancellation, the Governance Safe must re-propose the operation.",
+    note: cancelled?.setGuardian
+      ? GUARDIAN_CHANGE_CANCELLED_NOTE
+      : "If this was not an agreed cancellation, the Governance Safe must re-propose the operation.",
   };
 }
 

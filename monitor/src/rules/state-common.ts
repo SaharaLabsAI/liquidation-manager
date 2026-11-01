@@ -383,11 +383,15 @@ export function hexMinus<T extends string>(a: readonly T[], b: readonly string[]
 }
 
 /**
- * CCIP selectors of the counterpart chain(s): the other configured chains, plus the Manager pool specs'
- * `remoteChainSelector` passed in `specSelectors` (covers a single-chain config).
+ * CCIP selectors of the counterpart chain(s): the other configured chains. A single-chain config falls back to the
+ * Manager pool specs' `remoteChainSelector` passed in `specSelectors`, except this chain's own selector. A spec that
+ * names another lane is reported by state-pool; checking the Router's ramps for it against `expected.onRamp` and
+ * `expected.offRamps`, which describe the configured lane, would only add false "changed" alerts.
  */
 export function remoteSelectorsOf(ctx: ChainContext, specSelectors: readonly bigint[] = []): bigint[] {
-  return [...new Set([...otherChainSelectors(ctx), ...specSelectors])];
+  const others = otherChainSelectors(ctx);
+  if (others.length) return others;
+  return [...new Set(specSelectors.filter((selector) => selector !== ctx.config.chainSelector))];
 }
 
 /** Adapters whose pool the TokenAdminRegistry currently maps the token to (the live bridge pool). */

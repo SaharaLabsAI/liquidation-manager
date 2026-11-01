@@ -107,6 +107,26 @@ export function timelockNamespace(chain: string): string {
 }
 
 /**
+ * Store namespace of what each cancelled scheduling was, keyed by `<txHash>:<logIndex>` of its `Cancelled` log. The
+ * controller rule describes `ProposalCancelled` from it: the op record may already hold a later scheduling of the same
+ * id from the same block range.
+ */
+export function timelockCancelsNamespace(chain: string): string {
+  return `timelock-cancels:${chain}`;
+}
+
+/** One cancelled scheduling, as the controller rule reads it. */
+export interface CancelledScheduling {
+  id: Hex;
+  summary: string;
+  readyAt: number;
+  /** The operation contains a setGuardian call. */
+  setGuardian: boolean;
+  /** Unix seconds of the cancelling transaction (for pruning). */
+  at: number;
+}
+
+/**
  * Every operation the monitor tracks on `chain`, keyed by op id: pending ones and those executed or cancelled in the
  * last 30 days (check `status`). The controller rule uses it to describe `ProposalCancelled`.
  */
@@ -257,9 +277,15 @@ function etaText(readyAt: number, reference: number): string {
 
 /**
  * The Guardian's options for `op`: the exact cancel transaction, or why there is none. Shared by the scheduled alert
- * and the queue conditions, so every reminder carries the instruction.
+ * and the queue conditions, so every reminder carries the instruction. Before the ETA the deadline is the ETA, after
+ * which Governance can execute; once the ETA has passed (`reference`) the operation can still be cancelled until it is
+ * executed, so the instruction is to cancel now.
  */
-function guardianFields(ctx: ChainContext, op: PendingOp): {fields: AlertField[]; note: string} {
+function guardianFields(ctx: ChainContext, op: PendingOp, reference: number): {fields: AlertField[]; note: string} {
+  const passed = op.readyAt <= reference;
+  const deadline = passed
+    ? `now: its ETA (${formatTimestamp(op.readyAt)}) has passed`
+    : `before ${formatTimestamp(op.readyAt)}`;
   const fields: AlertField[] = [];
   const timelock = ctx.addresses.timelock;
   const governanceCancel = (): AlertField[] =>
@@ -280,7 +306,8 @@ function guardianFields(ctx: ChainContext, op: PendingOp): {fields: AlertField[]
       fields,
       note:
         "Protected Guardian recovery. Confirm with the Governance Safe signers that this replacement is intended; if " +
-        "not, the Governance Safe must cancel it with Timelock.cancel(id) before the ETA.",
+        "not, the Governance Safe must cancel it with Timelock.cancel(id) " +
+        `${passed ? "now, before it is executed" : "before the ETA"}.`,
     };
   }
   const controller = ctx.addresses.controller;
@@ -297,9 +324,7 @@ function guardianFields(ctx: ChainContext, op: PendingOp): {fields: AlertField[]
     const cancel = guardianCancelCalldata(op, controller);
     fields.push({
       label: "Guardian action",
-      value:
-        `Guardian Safe: call GuardianController.${cancel.signature} (value 0) ` +
-        `before ${formatTimestamp(op.readyAt)}`,
+      value: `Guardian Safe: call GuardianController.${cancel.signature} (value 0) ${deadline}`,
     });
     fields.push(addressField(ctx, "Cancel tx: to", cancel.to));
     fields.push(...calldataFields("Cancel tx: calldata", cancel.data));
@@ -307,7 +332,7 @@ function guardianFields(ctx: ChainContext, op: PendingOp): {fields: AlertField[]
       fields,
       note:
         "Review every call. If this proposal is not expected, the Guardian Safe must send the cancel transaction " +
-        "above before the ETA.",
+        `above ${passed ? "now: it can be cancelled until it is executed" : "before the ETA"}.`,
     };
   } catch {
     fields.push({
@@ -521,7 +546,7 @@ async function handleScheduled(
   fields.push({label: "Salt", value: salt ?? "0 (none)", code: true});
   for (const warning of warnings) fields.push({label: "Warning", value: warning});
   // Cancelled again before the transaction ended: nothing for the Guardian to cancel.
-  const guardian = run.cancelledInTx ? undefined : guardianFields(ctx, op);
+  const guardian = run.cancelledInTx ? undefined : guardianFields(ctx, op, nowSec());
   if (guardian) fields.push(...guardian.fields);
   else fields.push({label: "Status", value: "Cancelled later in this transaction: not pending, nothing to cancel"});
 
@@ -551,11 +576,26 @@ function opIncludesSetGuardian(op: PendingOp | undefined): boolean {
   return !!op && op.calls.some((call) => isSetGuardianData(call.data));
 }
 
+/**
+ * The ETA the scheduling itself set (OpenZeppelin stores block.timestamp + delay). `readyAt` can already hold
+ * `getTimestamp(id)` of a later scheduling of the same id, read by the queue rule at the head while the scan lags.
+ */
+function schedulingEta(op: PendingOp): number {
+  return op.scheduledAt + Number(op.delay);
+}
+
 function handleCancelled(ctx: ChainContext, ops: Record<Hex, PendingOp>, id: Hex, log: Log, tx: TxContext): void {
   const op = ops[id];
   if (op) {
     op.status = "cancelled";
     op.closedAt = tx.timestamp;
+    recordCancel(ctx, `${tx.txHash.toLowerCase()}:${log.logIndex ?? 0}`, {
+      id,
+      summary: op.summary,
+      readyAt: schedulingEta(op),
+      setGuardian: opIncludesSetGuardian(op),
+      at: tx.timestamp,
+    });
   }
   const guardian = tx.guardianCancels.get(id.toLowerCase());
   // Pending ops naming this one as predecessor cannot execute until it is scheduled again and executed.
@@ -573,7 +613,7 @@ function handleCancelled(ctx: ChainContext, ops: Record<Hex, PendingOp>, id: Hex
       ? addressField(ctx, "Cancelled by Guardian (via GuardianController)", guardian)
       : {label: "Cancelled by", value: "a CANCELLER_ROLE holder directly (normally the Governance Safe)"},
   ];
-  if (op) fields.push({label: "Was executable at", value: formatTimestamp(op.readyAt)});
+  if (op) fields.push({label: "Was executable at", value: formatTimestamp(schedulingEta(op))});
   for (const other of dependents) {
     fields.push({label: "Stalls pending operation", value: `${other.id} (${other.summary})`});
   }
@@ -581,6 +621,10 @@ function handleCancelled(ctx: ChainContext, ops: Record<Hex, PendingOp>, id: Hex
     ? "Timelock Guardian change cancelled"
     : `Timelock operation cancelled${op ? `: ${shortTitleFromSummary(op.summary)}` : ""}`;
   if (stallsRecovery && !opIncludesSetGuardian(op)) title += " (stalls a pending Guardian recovery)";
+  const notes = [
+    dependents.length ? predecessorNote(stallsRecovery) : undefined,
+    opIncludesSetGuardian(op) ? GUARDIAN_CHANGE_CANCELLED_NOTE : undefined,
+  ].filter((note): note is string => note !== undefined);
   ctx.alerter.emit({
     key: logKey(ctx, RULE, log),
     kind: "event",
@@ -590,8 +634,25 @@ function handleCancelled(ctx: ChainContext, ops: Record<Hex, PendingOp>, id: Hex
     title,
     fields,
     links: [txLink(ctx, tx.txHash)],
-    note: dependents.length ? predecessorNote(stallsRecovery) : undefined,
+    note: notes.length ? notes.join(" ") : undefined,
   });
+}
+
+/** What to do after a Guardian change was cancelled: re-propose it in the one form the Guardian cannot cancel. */
+export const GUARDIAN_CHANGE_CANCELLED_NOTE =
+  "If this Guardian change was not an agreed cancellation, re-propose it as a single protected call: " +
+  "LiquidityManager.setGuardian(newGuardian) alone, value 0, predecessor 0 (GuardianController.isProtectedCall " +
+  "returns true). The Guardian can cancel it in any other form.";
+
+function recordCancel(ctx: ChainContext, key: string, entry: CancelledScheduling): void {
+  const namespace = timelockCancelsNamespace(ctx.name);
+  const cancels = ctx.store.get<Record<string, CancelledScheduling>>(namespace, {});
+  for (const [other, stored] of Object.entries(cancels)) {
+    if (stored.at < entry.at - PRUNE_AFTER_SEC) delete cancels[other];
+  }
+  // A chunk processed again sees the op as its first pass left it, possibly a later scheduling: keep the first record.
+  cancels[key] ??= entry;
+  ctx.store.set(namespace, cancels);
 }
 
 /** Why an op whose predecessor is not executed cannot run, and what unblocks it. */
@@ -653,7 +714,7 @@ function handleAdminEvent(ctx: ChainContext, decoded: DecodedTimelockLog, log: L
       ctx.alerter.emit({
         ...base,
         rule: "timelock.delay",
-        title: `Timelock delay changed: ${formatDuration(oldDuration)} -> ${formatDuration(newDuration)}`,
+        title: `Timelock delay changed: ${formatDuration(oldDuration, true)} -> ${formatDuration(newDuration, true)}`,
         fields: [
           {label: "Old delay", value: `${formatDuration(oldDuration)} (${oldDuration}s)`},
           {label: "New delay", value: `${formatDuration(newDuration)} (${newDuration}s)`},
@@ -812,7 +873,9 @@ async function processTx(
               title: "Timelock operation scheduled (monitor could not decode it)",
               fields: [{label: "Operation id", value: id, code: true}],
               links: [txLink(ctx, tx.txHash)],
-              note: "Inspect the scheduling transaction now; the Guardian has until the ETA to cancel.",
+              note:
+                "Inspect the scheduling transaction now. It can be executed from its ETA, so a cancel must land " +
+                "before then.",
             });
           }
           if (!run.ordinal) firstKeys.set(id, key);
@@ -906,7 +969,7 @@ function queueCondition(
   reference: number,
   predecessorState?: number,
 ): Alert {
-  const guardian = guardianFields(ctx, op);
+  const guardian = guardianFields(ctx, op, reference);
   const name = shortTitleFromSummary(op.summary);
   const blocked = subject === "blocked";
   const fields: AlertField[] = [

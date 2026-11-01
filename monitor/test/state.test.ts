@@ -25,6 +25,7 @@ import {
   deployment,
   addMigrationTarget,
   encodedAddress,
+  ETH,
   expectedConfig,
   grant,
   key,
@@ -235,11 +236,14 @@ describe("state-pool", () => {
   it("Router changed", async () => {
     const model = deployment();
     pool(model).router = A.stranger;
-    const {keys} = await run(model);
+    const {keys, conditions} = await run(model);
     expect(keys).toEqual({
       [key("state-pool", `${P}:router`)]: "critical",
       [key("state-manager", "verify-adapter:1")]: "critical",
     });
+    expect(find(conditions, key("state-pool", `${P}:router`)).title).toBe(
+      `Pool Router is ${A.stranger}, spec requires Router`,
+    );
   });
 
   it("typeAndVersion changed", async () => {
@@ -581,6 +585,34 @@ describe("state-router", () => {
     const {keys} = await run(model);
     expect(keys).toEqual({[key("state-router", `on-ramp:${BSC}`)]: "high"});
   });
+
+  it("checks the configured lane only when the Manager spec names another one", async () => {
+    const model = deployment();
+    const spec = model.manager.specs[lc(A.pool)];
+    if (!spec) throw new Error("fixture");
+    spec.remoteChainSelector = ETH;
+    const {keys} = await run(model);
+    expect(Object.keys(keys).filter((k) => k.includes(":state-router:"))).toEqual([]);
+    expect(keys[key("state-pool", `${P}:chains`)]).toBe("critical");
+    expect(keys[key("state-pool", `${P}:lane`)]).toBe("critical");
+  });
+
+  it("reports a pool and spec moved together to a lane that is not configured", async () => {
+    const model = deployment();
+    const spec = model.manager.specs[lc(A.pool)];
+    if (!spec) throw new Error("fixture");
+    const other = 999n;
+    spec.remoteChainSelector = other;
+    const p = pool(model);
+    p.chains = [other];
+    for (const map of [p.remoteToken, p.remotePools, p.outbound, p.inbound] as Array<Record<string, unknown>>) {
+      map[other.toString()] = map[BSC.toString()];
+    }
+    const {keys, conditions} = await run(model);
+    expect(keys[key("state-pool", `${P}:lane`)]).toBe("critical");
+    expect(keys[key("state-pool", `${P}:chains`)]).toBeUndefined();
+    expect(find(conditions, key("state-pool", `${P}:lane`)).title).toBe("Pool spec lane 999 is not a configured chain");
+  });
 });
 
 describe("state-timelock / state-controller", () => {
@@ -590,6 +622,13 @@ describe("state-timelock / state-controller", () => {
     const {keys, conditions} = await run(model);
     expect(keys).toEqual({[key("state-timelock", "min-delay")]: "critical"});
     expect(find(conditions, key("state-timelock", "min-delay")).title).toBe("Timelock delay is 1h, expected 2d");
+  });
+
+  it("delay off by seconds: the title keeps them", async () => {
+    const model = deployment();
+    model.timelock.minDelay = 2n * 86400n + 1n;
+    const {conditions} = await run(model);
+    expect(find(conditions, key("state-timelock", "min-delay")).title).toBe("Timelock delay is 2d 1s, expected 2d");
   });
 
   it("expected proposer lost its role", async () => {

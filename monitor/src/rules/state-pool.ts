@@ -8,7 +8,7 @@ import {tokenPoolAbi} from "../abi/external.ts";
 import {liquidityManagerAbi} from "../abi/generated.ts";
 import {effectiveExpected, resolveRef, toUnits} from "../config.ts";
 import type {AlertField, ChainContext} from "../types.ts";
-import {addressField, addressLink, chainNameForSelector, sameAddress} from "./common.ts";
+import {addressField, addressLink, chainNameForSelector, otherChainSelectors, sameAddress} from "./common.ts";
 import {
   amount,
   defineStateRule,
@@ -135,7 +135,9 @@ async function checkPool(check: StateCheck, pool: Address): Promise<void> {
         check: "router",
         subject: `${subject}:router`,
         severity: "critical",
-        title: `${name} Router changed to ${ctx.label(getAddress(router))}`,
+        title:
+          `${name} Router is ${ctx.label(getAddress(router))}, ` +
+          `spec requires ${ctx.label(getAddress(spec.router))}`,
         fields: [
           addressField(ctx, "Pool", pool),
           addressField(ctx, "Router", router),
@@ -175,6 +177,29 @@ async function checkPool(check: StateCheck, pool: Address): Promise<void> {
         note:
           "Pool liquidity is reachable from a lane the Manager did not approve, or the lane was removed. " +
           "Funding fails.",
+      });
+    }
+    // The monitor watches the configured lanes only (CCIP messages, Router ramps, reconciliation). A single-chain
+    // config has no counterpart to compare with.
+    const counterparts = otherChainSelectors(ctx);
+    if (counterparts.length && !counterparts.includes(remote)) {
+      check.raise({
+        check: "lane",
+        subject: `${subject}:lane`,
+        severity: "critical",
+        title: `${name} spec lane ${remoteName} is not a configured chain`,
+        fields: [
+          addressField(ctx, "Pool", pool),
+          specField("Spec", `${remoteName} (${remote})`),
+          specField(
+            "Configured",
+            counterparts.map((selector) => `${chainNameForSelector(ctx, selector)} (${selector})`).join("\n"),
+          ),
+        ],
+        links,
+        note:
+          "The Manager funds this pool for a lane the monitor does not watch: its CCIP messages, Router ramps and " +
+          "in-flight amounts are not checked. Find the Timelock operation that changed the spec.",
       });
     }
     if (chains?.includes(remote)) await checkRemote(check, pool, remote, spec.remoteToken, spec.remotePools);
