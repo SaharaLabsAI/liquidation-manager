@@ -425,8 +425,8 @@ allowance, adapter dust, which is irreversible). These rely on the monitor's uni
 
 ### Monitor findings
 
-None changes what is detected or its severity; they are wrong or misleading text in alerts. The first seven are fixed
-in `monitor/` (with regression tests that fail on the old code); the rest are open.
+None changes what is detected or its severity; they are wrong, misleading or noisy alerts. The first eight are fixed in
+`monitor/` (with regression tests that fail on the old code); the rest are open.
 
 - **Call numbers in Timelock attribution were 0-based**: config events said "Timelock operation (call #3)" for the
   call `timelock.executed` lists as "Call 4/12", and the first call of a batch had no number. Now "(call 4/12)".
@@ -444,8 +444,11 @@ in `monitor/` (with regression tests that fail on the old code); the rest are op
 - **`state-router` followed the Manager's spec**: a spec with a wrong remote selector also raised "Router OnRamp /
   OffRamps changed" for that selector. Now only the configured lanes are checked, and the new `state-pool.lane`
   reports a spec on a lane that is not configured.
-- **Read failures alert on the first failure** (observation): one transient publicnode error on a block-timestamp
-  read opened `timelock-queue.read-failed` as a warning and resolved it 7 s later, two messages for one RPC blip.
+- **Passing RPC errors paged the channel**: every failed read raised a warning at once and listed every read
+  ("Cannot verify state-timelock: 70 read(s) failed", resolved 26 s later), and one failed reconciliation run between
+  good ones raised and resolved `reconcile.incomplete` (20 times in a day on publicnode). Now a failure raises its
+  warning only after `alerts.transientFailureGraceSec` (60 s; escalation unchanged), and "Failed reads" has one line per
+  function, counted ("Timelock.hasRole(…) ×56"), at most 10 lines.
 - **Hard-coded "SAHARA"** in two titles (`Registry maps SAHARA to no pool`, `SAHARA sent directly to …`); cosmetic on
   testnet only.
 - By design (documented): `flows.outflow-window` opens once at high and stays silent while the window keeps growing (in

@@ -169,6 +169,8 @@ export interface ReconcileReport {
 export interface ReconcileOptions {
   /** Clock in unix ms (tests). */
   now?: () => number;
+  /** True holds back this run's reconcile.incomplete warning (the daemon's grace for a passing failure). */
+  holdIncomplete?: (report: ReconcileReport) => boolean;
 }
 
 interface ChainData {
@@ -718,7 +720,7 @@ export async function reconcile(
       active.push(kept(previous[supplyKey(chain.chain)]!, `${chain.chain} unreachable`));
     }
   }
-  if (report.incomplete.length) active.push(incompleteAlert(report.incomplete));
+  if (report.incomplete.length && !opts.holdIncomplete?.(report)) active.push(incompleteAlert(report.incomplete));
 
   alerter.sync(RECONCILE_SCOPE, active);
   store?.set(RECONCILE_NAMESPACE, {conditions: Object.fromEntries(active.map((alert) => [alert.key, alert]))});

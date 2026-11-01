@@ -30,6 +30,9 @@ alerts:
   # (kept across a restart), so it also fires while a Telegram route cannot take its alerts (they are kept and retried)
   # or a first-start backfill runs long.
   heartbeatUrl: ${HEARTBEAT_URL:-}
+  # A failed read or a reconciliation run blocked by a failure raises its warning only once it has lasted this long, so
+  # a passing RPC error pages no one. Escalation (high after staleAfterSec) is unchanged; 0 = warn at the first failure.
+  transientFailureGraceSec: 60
 
 telegram:
   botToken: ${TELEGRAM_BOT_TOKEN}

@@ -148,7 +148,8 @@ export async function writeE2EConfig(options: E2EConfigOptions): Promise<E2EConf
     logLevel: options.logLevel ?? "info",
     stateFile,
     token: {symbol: "SAHARA", decimals: 18},
-    alerts: {reminderSec: {critical: 3600, high: 14400, warning: 43200, info: 0}},
+    // No grace: the read-failed warnings of KNOWN_MOCK_CONDITIONS are part of the first cycle's baseline.
+    alerts: {reminderSec: {critical: 3600, high: 14400, warning: 43200, info: 0}, transientFailureGraceSec: 0},
     reconciliation: {enabled: false},
     chains: {[CHAIN]: chain},
   };

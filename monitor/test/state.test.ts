@@ -15,6 +15,7 @@ import {
   timelockStateRule,
   tokenStateRule,
 } from "../src/rules/state.ts";
+import {summarizeFailures} from "../src/rules/state-common.ts";
 import {createStore} from "../src/store.ts";
 import type {Alert} from "../src/types.ts";
 import {
@@ -750,5 +751,18 @@ describe("without a Manager", () => {
       [key("state-token", "paused")]: "critical",
       [key("state-pool", `${P}:owner`)]: "critical",
     });
+  });
+});
+
+describe("summarizeFailures", () => {
+  it("counts a function that failed repeatedly, keeps single calls and caps the lines", () => {
+    expect(summarizeFailures(["Token.owner()", "Token.paused()"])).toBe("Token.owner()\nToken.paused()");
+    const outage = [
+      ...Array.from({length: 56}, (_, i) => `Timelock.hasRole(PROPOSER, 0x${i.toString(16)})`),
+      "Timelock.getMinDelay()",
+    ];
+    expect(summarizeFailures(outage)).toBe("Timelock.hasRole(…) ×56\nTimelock.getMinDelay()");
+    const distinct = Array.from({length: 13}, (_, i) => `Contract${i}.read()`);
+    expect(summarizeFailures(distinct).split("\n")).toEqual([...distinct.slice(0, 10), "… and 3 more"]);
   });
 });

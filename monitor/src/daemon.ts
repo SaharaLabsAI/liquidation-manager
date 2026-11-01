@@ -44,6 +44,7 @@ import {
   healthScope,
   isStale,
   listen,
+  readFailedInGrace,
   RECONCILE_STALE_KEY,
   reconcileStale,
   reconcileStaleConditions,
@@ -646,7 +647,10 @@ export class Daemon {
     const run = (async () => {
       const at = this.#now();
       try {
-        const report = await this.#reconcile(this.contexts, this.alerter, this.config, {now: this.#now});
+        const report = await this.#reconcile(this.contexts, this.alerter, this.config, {
+          now: this.#now,
+          holdIncomplete: (pending) => this.#transientlyBlocked(pending, at),
+        });
         this.#report = report;
         this.#trackReconcile(at, {report});
         this.#log.info("reconciliation", {status: report.status, R: report.R, I: report.I, margin: report.margin});
@@ -738,6 +742,18 @@ export class Daemon {
    * (`blockingFailures`: not CCIP tracking disabled by config, not CCIP gaps) starts or extends the blocked span; any
    * other run ends it (a complete one has no blocking reason).
    */
+  /**
+   * Whether the run starting at `at` is blocked only by failures (an unreachable chain, CCIP tracking not started, a
+   * lagging scan) for less than `alerts.transientFailureGraceSec`, counted from the first run of the blocked span: its
+   * reconcile.incomplete warning is held back. health.reconcile-stale still counts the whole span.
+   */
+  #transientlyBlocked(report: ReconcileReport, at: number): boolean {
+    const failures = blockingFailures(report);
+    if (!failures.length || failures.length !== report.incomplete.length) return false;
+    const since = this.#reconcileRuns.blockedSince ?? at;
+    return (this.#now() - since) / 1000 < this.config.alerts.transientFailureGraceSec;
+  }
+
   #trackReconcile(at: number, result: {report: ReconcileReport} | {error: string}): void {
     const runs = this.#reconcileRuns;
     const complete = "report" in result && result.report.status !== "incomplete";
@@ -888,9 +904,15 @@ export class Daemon {
       if (!result) continue;
       const {conditions} = result;
       const staleAfterSec = runtime.chain.staleAfterSec;
+      const grace = this.config.alerts.transientFailureGraceSec;
       this.alerter.sync(
         `${runtime.name}:${rule.id}:`,
-        conditions.map((alert) => (alert.key === key ? escalateReadFailed(alert, entry, now, staleAfterSec) : alert)),
+        conditions.flatMap((alert) => {
+          if (alert.key !== key) return [alert];
+          // A passing RPC error: tracked for /healthz and escalation, not raised until it lasts.
+          if (readFailedInGrace(entry, now, grace, staleAfterSec)) return [];
+          return [escalateReadFailed(alert, entry, now, staleAfterSec)];
+        }),
       );
     }
     runtime.checkedAt = head;

@@ -239,7 +239,7 @@ function finish(check: StateCheck): {conditions: Alert[]; snapshot: Record<strin
       rule: `${ruleId}.read-failed`,
       chain: ctx.name,
       title: `Cannot verify ${ruleId}: ${check.failures.length} read(s) failed`,
-      fields: [{label: "Failed reads", value: check.failures.join("\n"), code: true}],
+      fields: [{label: "Failed reads", value: summarizeFailures(check.failures), code: true}],
       note: "Conditions open from the last cycle stay open until the reads succeed again.",
     });
   }
@@ -250,6 +250,26 @@ function finish(check: StateCheck): {conditions: Alert[]; snapshot: Record<strin
     complete: !check.aborted,
   };
   return {conditions, snapshot: check.snapshot, reads};
+}
+
+const MAX_FAILURE_LINES = 10;
+
+/**
+ * The failed reads of a cycle, one line per function in first-failure order: a function that failed once keeps its
+ * arguments ("Pool.getRebalancer()"), one that failed several times is counted ("Timelock.hasRole(…) ×56"). At most
+ * MAX_FAILURE_LINES lines: an RPC outage fails every read of a rule, and the message must stay readable.
+ */
+export function summarizeFailures(failures: readonly string[]): string {
+  const groups = new Map<string, string[]>();
+  for (const failure of failures) {
+    const name = failure.includes("(") ? failure.slice(0, failure.indexOf("(")) : failure;
+    const group = groups.get(name);
+    if (group) group.push(failure);
+    else groups.set(name, [failure]);
+  }
+  const lines = [...groups].map(([name, group]) => (group.length === 1 ? group[0]! : `${name}(…) ×${group.length}`));
+  if (lines.length <= MAX_FAILURE_LINES) return lines.join("\n");
+  return [...lines.slice(0, MAX_FAILURE_LINES), `… and ${lines.length - MAX_FAILURE_LINES} more`].join("\n");
 }
 
 /** The contract read and every address argument of a call. */

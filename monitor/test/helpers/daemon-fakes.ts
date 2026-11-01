@@ -31,14 +31,19 @@ export interface Clock {
   now: number;
 }
 
-/** Two chains (ethereum, bsc) with small ranges and intervals; `chains` entries are merged into each chain. */
+/**
+ * Two chains (ethereum, bsc) with small ranges and intervals; `chains` entries are merged into each chain. Failures
+ * raise their warning at once (`alerts.transientFailureGraceSec: 0`) unless `alerts` sets a grace: most tests check the
+ * escalation stages, not the grace.
+ */
 export function daemonConfig(
   input: {chains?: Record<string, Record<string, unknown>>; [key: string]: unknown} = {},
 ): Config {
-  const {chains = {ethereum: {}, bsc: {}}, ...rest} = input;
+  const {chains = {ethereum: {}, bsc: {}}, alerts = {}, ...rest} = input;
   return configSchema.parse({
     reconciliation: {enabled: false},
     ...rest,
+    alerts: {transientFailureGraceSec: 0, ...(alerts as Record<string, unknown>)},
     chains: Object.fromEntries(
       Object.entries(chains).map(([name, extra], i) => [
         name,

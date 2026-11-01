@@ -52,6 +52,7 @@ import {
   sameAddress,
   txLink,
 } from "./common.ts";
+import {summarizeFailures} from "./state-common.ts";
 
 export interface PendingOp {
   id: Hex;
@@ -1126,7 +1127,7 @@ export const timelockQueueRule: StateRule = {
         rule: "timelock-queue.read-failed",
         chain: ctx.name,
         title: "Cannot verify the Timelock queue",
-        fields: [{label: "Failed reads", value: failures.join(", "), code: true}],
+        fields: [{label: "Failed reads", value: summarizeFailures(failures), code: true}],
         note: "Pending operations are still evaluated against their stored ETA.",
       });
     }
