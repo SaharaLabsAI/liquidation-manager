@@ -107,6 +107,34 @@ describe("failed state reads", () => {
     expect(readChainState(t.store, "ethereum").reads).toEqual({"state-token": {okAt: t.clock.now}});
   });
 
+  it("hold back the warning for a failure shorter than alerts.transientFailureGraceSec", async () => {
+    const t = testDaemon({
+      config: daemonConfig({chains: {ethereum: {staleAfterSec: 180}}, alerts: {transientFailureGraceSec: 60}}),
+      stateRules: [tokenStateRule],
+    });
+    const reads = tokenReads(t.chains.ethereum!);
+    // An RPC blip of 50 s: tracked for /healthz, never sent, so nothing to resolve either.
+    await t.daemon.cycle("ethereum");
+    for (let i = 0; i < 5; i++) await next(t, POLL_MS);
+    expect(readChainState(t.store, "ethereum").reads?.["state-token"]?.failingSince).toBe(T0);
+    reads.fail = false;
+    await next(t, POLL_MS);
+    expect(about(t, KEY)).toEqual([]);
+
+    // A failure that lasts: the warning once it has failed for 60 s, then the usual escalation at staleAfterSec.
+    reads.fail = true;
+    const since = t.clock.now + POLL_MS;
+    while (t.clock.now - since < 50_000) await next(t, POLL_MS);
+    expect(about(t, KEY)).toEqual([]);
+    await next(t, POLL_MS);
+    expect(about(t, KEY)).toEqual([`firing:warning:${KEY}`]);
+    while (t.clock.now - since <= 180_000) await next(t, POLL_MS);
+    expect(about(t, KEY)).toEqual([`firing:warning:${KEY}`, `firing:high:${KEY}`]);
+    reads.fail = false;
+    await next(t, POLL_MS);
+    expect(about(t, KEY)).toEqual([`firing:warning:${KEY}`, `firing:high:${KEY}`, `resolved:high:${KEY}`]);
+  });
+
   it("keep counting across a restart: stale before any check, no message, critical from the 1st failure", async () => {
     const store = createStore();
     const config = daemonConfig({chains: {ethereum: {}}, alerts: {heartbeatUrl: HEARTBEAT}});

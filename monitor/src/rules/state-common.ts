@@ -239,7 +239,7 @@ function finish(check: StateCheck): {conditions: Alert[]; snapshot: Record<strin
       rule: `${ruleId}.read-failed`,
       chain: ctx.name,
       title: `Cannot verify ${ruleId}: ${check.failures.length} read(s) failed`,
-      fields: [{label: "Failed reads", value: check.failures.join("\n"), code: true}],
+      fields: [{label: "Failed reads", value: summarizeFailures(check.failures), code: true}],
       note: "Conditions open from the last cycle stay open until the reads succeed again.",
     });
   }
@@ -250,6 +250,26 @@ function finish(check: StateCheck): {conditions: Alert[]; snapshot: Record<strin
     complete: !check.aborted,
   };
   return {conditions, snapshot: check.snapshot, reads};
+}
+
+const MAX_FAILURE_LINES = 10;
+
+/**
+ * The failed reads of a cycle, one line per function in first-failure order: a function that failed once keeps its
+ * arguments ("Pool.getRebalancer()"), one that failed several times is counted ("Timelock.hasRole(…) ×56"). At most
+ * MAX_FAILURE_LINES lines: an RPC outage fails every read of a rule, and the message must stay readable.
+ */
+export function summarizeFailures(failures: readonly string[]): string {
+  const groups = new Map<string, string[]>();
+  for (const failure of failures) {
+    const name = failure.includes("(") ? failure.slice(0, failure.indexOf("(")) : failure;
+    const group = groups.get(name);
+    if (group) group.push(failure);
+    else groups.set(name, [failure]);
+  }
+  const lines = [...groups].map(([name, group]) => (group.length === 1 ? group[0]! : `${name}(…) ×${group.length}`));
+  if (lines.length <= MAX_FAILURE_LINES) return lines.join("\n");
+  return [...lines.slice(0, MAX_FAILURE_LINES), `… and ${lines.length - MAX_FAILURE_LINES} more`].join("\n");
 }
 
 /** The contract read and every address argument of a call. */
@@ -383,11 +403,15 @@ export function hexMinus<T extends string>(a: readonly T[], b: readonly string[]
 }
 
 /**
- * CCIP selectors of the counterpart chain(s): the other configured chains, plus the Manager pool specs'
- * `remoteChainSelector` passed in `specSelectors` (covers a single-chain config).
+ * CCIP selectors of the counterpart chain(s): the other configured chains. A single-chain config falls back to the
+ * Manager pool specs' `remoteChainSelector` passed in `specSelectors`, except this chain's own selector. A spec that
+ * names another lane is reported by state-pool; checking the Router's ramps for it against `expected.onRamp` and
+ * `expected.offRamps`, which describe the configured lane, would only add false "changed" alerts.
  */
 export function remoteSelectorsOf(ctx: ChainContext, specSelectors: readonly bigint[] = []): bigint[] {
-  return [...new Set([...otherChainSelectors(ctx), ...specSelectors])];
+  const others = otherChainSelectors(ctx);
+  if (others.length) return others;
+  return [...new Set(specSelectors.filter((selector) => selector !== ctx.config.chainSelector))];
 }
 
 /** Adapters whose pool the TokenAdminRegistry currently maps the token to (the live bridge pool). */

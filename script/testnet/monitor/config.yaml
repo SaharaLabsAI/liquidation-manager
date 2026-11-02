@@ -1,0 +1,131 @@
+# Liquidity monitor configuration for the testnet drill deployment (script/testnet/deployments/). Run from monitor/,
+# with TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID (a test bot and channel) in monitor/.env:
+#   node --env-file=.env src/cli.ts check --config ../script/testnet/monitor/config.yaml
+# MTK stands in for SAHARA: 1,000,000 supply on each chain, so requiredBacking is one chain's supply. The deployer holds
+# the reserves outside the Manager and is listed as the legacy wallet.
+
+logLevel: info
+stateFile: ./state/testnet.json
+
+http:
+  port: 9465
+
+token:
+  symbol: MTK
+  decimals: 18
+
+alerts:
+  reminderSec: # shorter than production, so the live test sees reminders
+    critical: 1800
+    high: 3600
+    warning: 7200
+    info: 0
+  dailySummaryUtc: "01:00"
+
+telegram:
+  botToken: ${TELEGRAM_BOT_TOKEN}
+  routes:
+    - chatId: ${TELEGRAM_CHANNEL_ID}
+      minSeverity: info
+
+reconciliation:
+  enabled: true
+  requiredBacking: "1000000"
+  intervalSec: 120
+
+chains:
+  bsc-testnet:
+    chainId: 97
+    chainSelector: "13264668187771770619"
+    rpcUrls: ["${BSC_TESTNET_RPC_URL:-https://bsc-testnet-rpc.publicnode.com}"]
+    explorerUrl: https://testnet.bscscan.com
+    confirmations: 5
+    pollIntervalSec: 3
+    maxLogRange: 2000
+    staleAfterSec: 180
+    contracts:
+      token: "0x8643a10dB4dEC8c1714213dD3313C45C3CE87416"
+      registry: "0xF8f2A4466039Ac8adf9944fD67DBb3bb13888f2B"
+      router: "0xE1053aE1857476f36A3C62580FF9b016E8EE8F6f"
+      pool: "0x9496255737DF25a4335e6436aFf9622661887082"
+      manager: "0x743C250a6B324b84e35D18910E90f146bd06963a"
+      timelock: "0x5FEf2963ee460e9015b5e1B3939b3D9F79adB1e8"
+      controller: "0xE3eAb5bD04dC7c52335Eec1CB50E5DCCFf1F8943"
+    reserves:
+      legacyWallets: ["0x07dc9C65e03d269f3E05A1C3F85E3e10a32d6783"] # deployer
+    expected:
+      governanceSafe: "0x3949Fa522Ab7677f59E0BCD9dE80f41eFD97097B"
+      guardian: "0x71B397916aad393B20a68651AdC3a0D9fD64b26C"
+      fundingOperators: ["0x500601806A44015b1497377f493447B29DD6fB2c"]
+      recallOperators: ["0x2fAbD12628934553a5809929535463167D690Da2"]
+      timelockDelaySec: 120
+      timelockRoles:
+        admins: [timelock]
+        proposers: [governanceSafe]
+        executors: [governanceSafe]
+        cancellers: [governanceSafe, controller]
+      tokenPaused: false
+      onRamp: "0xde34e3B2Cbc3162129424814CDD82811ADdA2A5a"
+      offRamps:
+        - "0xf1c128Fe52Ea78CcAAB407509292E61ce38C1523"
+        - "0xB513523aee87f838e78b32d2Bacaaf2e94D9f0f9"
+        - "0x32d4DD31a03e82FE7B1b8C9E5E6fa028B2fcA770"
+      rateLimits:
+        outbound: {enabled: true, capacity: "100000", rate: "1.67"}
+        inbound: {enabled: true, capacity: "100000", rate: "1.67"}
+    limits:
+      budgetLowPct: 20
+      largeTransfer: "500"
+      outflowWindowSec: 3600
+      outflowWindowAmount: "20000"
+    ccip:
+      enabled: true
+      stuckAfterSec: 600 # messages from this chain; BSC -> Sepolia took about 1 min in the drill
+
+  sepolia:
+    chainId: 11155111
+    chainSelector: "16015286601757825753"
+    rpcUrls: ["${SEPOLIA_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}"]
+    explorerUrl: https://sepolia.etherscan.io
+    confirmations: 2
+    pollIntervalSec: 12
+    maxLogRange: 1000
+    staleAfterSec: 300
+    contracts:
+      token: "0x8643a10dB4dEC8c1714213dD3313C45C3CE87416"
+      registry: "0x95F29FEE11c5C55d26cCcf1DB6772DE953B37B82"
+      router: "0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59"
+      pool: "0xA864a1D27195F5b00B42f612229505bB09DFdc1d"
+      manager: "0x9Bc0Aa79b7d18E335293cC327b5c4b21718fd87F"
+      timelock: "0x6032FA5E8b9C1B30406CcbE740Ec277dC3D9fea6"
+      controller: "0xCA704e8B652ef7733741927B47a176607D07571d"
+    reserves:
+      legacyWallets: ["0x07dc9C65e03d269f3E05A1C3F85E3e10a32d6783"] # deployer
+    expected:
+      governanceSafe: "0x3949Fa522Ab7677f59E0BCD9dE80f41eFD97097B"
+      guardian: "0x71B397916aad393B20a68651AdC3a0D9fD64b26C"
+      fundingOperators: ["0x500601806A44015b1497377f493447B29DD6fB2c"]
+      recallOperators: ["0x2fAbD12628934553a5809929535463167D690Da2"]
+      timelockDelaySec: 120
+      timelockRoles:
+        admins: [timelock]
+        proposers: [governanceSafe]
+        executors: [governanceSafe]
+        cancellers: [governanceSafe, controller]
+      tokenPaused: false
+      onRamp: "0x8dcf17f298c881A547D91ca4aA3C2AD7568C6777"
+      offRamps:
+        - "0xdE2d8E126e08d675fCD7fFa5a6CE49925f3Dc692"
+        - "0x04305BD9D9CA6730517f79c3D9c6828BC2D25Ecb"
+        - "0xc6A246A9AcdAaE651708706494720F79C3E5d0A1"
+      rateLimits:
+        outbound: {enabled: true, capacity: "100000", rate: "1.67"}
+        inbound: {enabled: true, capacity: "100000", rate: "1.67"}
+    limits:
+      budgetLowPct: 20
+      largeTransfer: "500"
+      outflowWindowSec: 3600
+      outflowWindowAmount: "20000"
+    ccip:
+      enabled: true
+      stuckAfterSec: 600 # messages from this chain; Sepolia -> BSC took 15 min in the drill, so expect reconcile.stuck-message

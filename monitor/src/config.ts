@@ -223,8 +223,15 @@ export const configSchema = z.object({
        * in a dry run.
        */
       heartbeatUrl: z.string().url().optional(),
+      /**
+       * A state rule's failed reads (`<rule>.read-failed`) and failed reconciliation runs (`reconcile.incomplete` for
+       * an unreachable chain, CCIP tracking not started or a lagging CCIP scan) raise their warning only once the
+       * failure has lasted this long, so a passing RPC error does not page anyone. Escalation (high after
+       * `staleAfterSec`, `health.reconcile-stale`), `/healthz`, the heartbeat and `check` are unchanged. 0 = at once.
+       */
+      transientFailureGraceSec: z.number().min(0).default(60),
     })
-    .default({reminderSec: {critical: 3600, high: 4 * 3600, warning: 12 * 3600, info: 0}}),
+    .default({reminderSec: {critical: 3600, high: 4 * 3600, warning: 12 * 3600, info: 0}, transientFailureGraceSec: 60}),
   telegram: z
     .object({
       botToken: z.string().min(1),

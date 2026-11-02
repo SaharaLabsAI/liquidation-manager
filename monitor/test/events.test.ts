@@ -205,7 +205,8 @@ describe("managerEventsRule", () => {
     ]);
     expect(alerts[0]?.note).toContain("max(minimum, trigger)");
     expect(field(alerts[0], "Minimum")).toBe("2,000 SAHARA");
-    expect(field(alerts[1], "Timelock operation (call #2)")).toBe(opId(7));
+    // Only call index 2 of the operation is in this transaction: numbered from 1, without a batch length.
+    expect(field(alerts[1], "Timelock operation (call 3)")).toBe(opId(7));
   });
 
   it("gives each GuardianAction of a multi-call Guardian transaction its own alert", async () => {
@@ -928,9 +929,10 @@ describe("event rules together", () => {
       ["critical", "pool.config", `Ownership transfer of Pool requested to ${EV.stranger}`],
       ["critical", "token.owner", `SAHARA token ownership transferred to ${EV.stranger}`],
     ]);
-    expect(field(alerts[0], "Timelock operation")).toBe(opId(1));
-    expect(field(alerts[1], "Timelock operation (call #2)")).toBe(opId(1));
-    expect(field(alerts[2], "Timelock operation (call #1)")).toBe(opId(1));
+    // Numbered from 1 with the batch length, as "Call N/M" in timelock.executed; the first call is numbered too.
+    expect(field(alerts[0], "Timelock operation (call 1/3)")).toBe(opId(1));
+    expect(field(alerts[1], "Timelock operation (call 3/3)")).toBe(opId(1));
+    expect(field(alerts[2], "Timelock operation (call 2/3)")).toBe(opId(1));
     expect(new Set(alerts.map((alert) => alert.key)).size).toBe(3);
     expect(ctx.log.warnings).toEqual([]);
   });

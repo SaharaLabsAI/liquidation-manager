@@ -67,7 +67,7 @@ export const timelockStateRule = defineStateRule(TIMELOCK_RULE, async (check) =>
     check.raise({
       check: "min-delay",
       severity: "critical",
-      title: `Timelock delay is ${formatDuration(minDelay)}, expected ${formatDuration(wantDelay)}`,
+      title: `Timelock delay is ${formatDuration(minDelay, true)}, expected ${formatDuration(wantDelay, true)}`,
       fields: [
         {label: "getMinDelay()", value: `${minDelay} s`, code: true},
         {label: "Expected", value: `${wantDelay} s`, code: true},

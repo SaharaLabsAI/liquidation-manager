@@ -300,6 +300,15 @@ export function readFailedSeverity(ageSec: number, staleAfterSec: number): Sever
   return ageSec > staleAfterSec ? "high" : "warning";
 }
 
+/**
+ * Whether a state rule's failed reads are still within `graceSec` (`alerts.transientFailureGraceSec`): the read-failed
+ * warning is held back until they have failed that long. Never past `staleAfterSec`, where the condition escalates.
+ */
+export function readFailedInGrace(reads: StateReads, now: number, graceSec: number, staleAfterSec: number): boolean {
+  const age = Math.max(0, Math.floor((now - (reads.failingSince ?? now)) / 1000));
+  return age < graceSec && age <= staleAfterSec;
+}
+
 const READ_FIELDS = ["Failing for", "Last successful read"];
 
 /**

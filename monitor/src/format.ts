@@ -25,8 +25,8 @@ export function shortHex(value: string, keep = 4): string {
   return value.length <= 2 + keep * 2 ? value : `${value.slice(0, 2 + keep)}…${value.slice(-keep)}`;
 }
 
-/** 93784 -> "1d 2h 3m". */
-export function formatDuration(seconds: number | bigint): string {
+/** 93784 -> "1d 2h 3m"; with `exact`, seconds are kept: 93784 -> "1d 2h 3m 4s", 121 -> "2m 1s". */
+export function formatDuration(seconds: number | bigint, exact = false): string {
   let rest = Math.max(0, Math.floor(Number(seconds)));
   const days = Math.floor(rest / 86400);
   rest %= 86400;
@@ -38,7 +38,7 @@ export function formatDuration(seconds: number | bigint): string {
   if (days) parts.push(`${days}d`);
   if (hours) parts.push(`${hours}h`);
   if (minutes) parts.push(`${minutes}m`);
-  if (!parts.length) parts.push(`${secs}s`);
+  if (!parts.length || (exact && secs)) parts.push(`${secs}s`);
   return parts.join(" ");
 }
 

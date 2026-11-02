@@ -5,6 +5,8 @@ import {tokenPoolAbi} from "../src/abi/external.ts";
 import {guardianControllerAbi, liquidityManagerAbi, saharaTimelockAbi} from "../src/abi/generated.ts";
 import type {fetchLogs} from "../src/chain/scanner.ts";
 import {scanChunk} from "../src/daemon.ts";
+import {formatTimestamp} from "../src/format.ts";
+import {eventRules} from "../src/rules/events.ts";
 import {TIMELOCK_ROLES} from "../src/rules/calls.ts";
 import {
   guardianCancelCalldata,
@@ -32,6 +34,7 @@ import {
 } from "./helpers/timelock-fixtures.ts";
 
 const DELAY = 259200n; // 72h
+const controllerRule = eventRules.find((rule) => rule.id === "controller") as EventRule;
 const BLOCK = 100n;
 const RANGE = {from: BLOCK, to: BLOCK + 10n};
 const SALT = keccak256(toHex("salt"));
@@ -628,6 +631,50 @@ describe("timelockEventsRule: Cancelled, CallExecuted and admin events", () => {
     expect(alert?.severity).toBe("critical");
     expect(alert?.title).toBe("Timelock Guardian change cancelled");
     expect(field(alert, "Cancelled by")).toMatch(/CANCELLER_ROLE holder directly/);
+    expect(alert?.note).toMatch(/re-propose it as a single protected call/);
+  });
+
+  it("tells governance to re-propose a Guardian change the Guardian cancelled in its protected form", async () => {
+    const mixed = batch([setGuardian(), thresholds], {salt: SALT});
+    const ctx = await run(mixed.logs);
+    const tx = txHash(5);
+    const logs = [
+      eventLog(saharaTimelockAbi, "Cancelled", {id: mixed.id}, {txHash: tx, blockNumber: BLOCK + 2n, logIndex: 0}),
+      eventLog(guardianControllerAbi, "ProposalCancelled", {id: mixed.id, guardian: TL.guardian}, {
+        txHash: tx,
+        blockNumber: BLOCK + 2n,
+        logIndex: 1,
+      }),
+    ];
+    await run(logs, ctx);
+    await controllerRule.onLogs(ctx, logs, RANGE);
+    const byRule = Object.fromEntries(ctx.alerter.emitted.map((alert) => [alert.rule, alert]));
+    expect(byRule["timelock.cancelled"]?.note).toMatch(/single protected call: LiquidityManager\.setGuardian/);
+    expect(byRule["controller.proposal-cancelled"]?.note).toMatch(/single protected call: LiquidityManager\.setGuardian/);
+  });
+
+  it("gives a Guardian cancel the ETA of the scheduling it cancelled, even when the id is re-scheduled later", async () => {
+    const first = single(thresholds, {salt: SALT, tx: 1});
+    const ctx = await run(first.logs);
+    const cancelledEta = readPendingOps(ctx.store, "ethereum")[first.id]?.readyAt;
+    const tx = txHash(5);
+    // One block range: the Guardian cancels, then governance schedules the same id again three blocks later.
+    const logs = [
+      eventLog(saharaTimelockAbi, "Cancelled", {id: first.id}, {txHash: tx, blockNumber: BLOCK + 2n, logIndex: 0}),
+      eventLog(guardianControllerAbi, "ProposalCancelled", {id: first.id, guardian: TL.guardian}, {
+        txHash: tx,
+        blockNumber: BLOCK + 2n,
+        logIndex: 1,
+      }),
+      ...single(thresholds, {salt: SALT, tx: 6, block: BLOCK + 5n}).logs,
+    ];
+    await run(logs, ctx);
+    await controllerRule.onLogs(ctx, logs, RANGE);
+    expect(readPendingOps(ctx.store, "ethereum")[first.id]?.readyAt).not.toBe(cancelledEta);
+    const byRule = Object.fromEntries(ctx.alerter.emitted.map((alert) => [alert.rule, alert]));
+    const expected = formatTimestamp(cancelledEta ?? 0);
+    expect(field(byRule["timelock.cancelled"], "Was executable at")).toBe(expected);
+    expect(field(byRule["controller.proposal-cancelled"], "Was executable at")).toBe(expected);
   });
 
   it("raises a cancel that stalls a pending Guardian recovery to critical and names the dependents", async () => {
@@ -668,6 +715,51 @@ describe("timelockEventsRule: Cancelled, CallExecuted and admin events", () => {
     expect(cancelled?.title).toBe("Timelock operation cancelled: LiquidityManager.setPoolThresholds");
     expect(field(cancelled, "Stalls pending operation")).toMatch(new RegExp(`^${child.id} \\(Pool.setRebalancer`));
     expect(cancelled?.note).not.toMatch(/predecessor 0/);
+  });
+
+  it("keeps the cancelled scheduling's own ETA when the queue rule already read a later one", async () => {
+    const first = single(thresholds, {salt: SALT, tx: 1});
+    const ctx = await run(first.logs);
+    const stored = readPendingOps(ctx.store, "ethereum")[first.id];
+    if (!stored) throw new Error("not tracked");
+    const ownEta = stored.scheduledAt + Number(stored.delay);
+    // The scan lags: the queue rule has read getTimestamp of a later scheduling of the same id at the head.
+    const ops = readPendingOps(ctx.store, "ethereum");
+    ctx.store.set(timelockNamespace("ethereum"), {ops: {...ops, [first.id]: {...stored, readyAt: ownEta + 86400}}});
+    const tx = txHash(5);
+    const logs = [
+      eventLog(saharaTimelockAbi, "Cancelled", {id: first.id}, {txHash: tx, blockNumber: BLOCK + 2n, logIndex: 0}),
+      eventLog(guardianControllerAbi, "ProposalCancelled", {id: first.id, guardian: TL.guardian}, {
+        txHash: tx,
+        blockNumber: BLOCK + 2n,
+        logIndex: 1,
+      }),
+    ];
+    await run(logs, ctx);
+    await controllerRule.onLogs(ctx, logs, RANGE);
+    const byRule = Object.fromEntries(ctx.alerter.emitted.map((alert) => [alert.rule, alert]));
+    expect(field(byRule["timelock.cancelled"], "Was executable at")).toBe(formatTimestamp(ownEta));
+    expect(field(byRule["controller.proposal-cancelled"], "Was executable at")).toBe(formatTimestamp(ownEta));
+  });
+
+  it("does not describe an untracked cancelled op with a later scheduling of the same id", async () => {
+    const later = single(thresholds, {salt: SALT, tx: 6, block: BLOCK + 5n});
+    const ctx = tlContext();
+    const tx = txHash(5);
+    const logs = [
+      eventLog(saharaTimelockAbi, "Cancelled", {id: later.id}, {txHash: tx, blockNumber: BLOCK + 2n, logIndex: 0}),
+      eventLog(guardianControllerAbi, "ProposalCancelled", {id: later.id, guardian: TL.guardian}, {
+        txHash: tx,
+        blockNumber: BLOCK + 2n,
+        logIndex: 1,
+      }),
+      ...later.logs,
+    ];
+    await run(logs, ctx);
+    await controllerRule.onLogs(ctx, logs, RANGE);
+    const alert = ctx.alerter.emitted.find((a) => a.rule === "controller.proposal-cancelled");
+    expect(field(alert, "Operation")).toMatch(/not tracked/);
+    expect(field(alert, "Was executable at")).toBeUndefined();
   });
 
   it("alerts a cancel of an untracked op", async () => {
@@ -849,6 +941,31 @@ describe("timelockQueueRule", () => {
 
     expect(snapshot["Pending Timelock operations"]).toBe("4");
     expect(snapshot["Next Timelock ETA"]).toMatch(/executable now\): op 4$/);
+  });
+
+  it("tells the Guardian to cancel before the ETA until it passes, and to cancel now after", async () => {
+    const soon = op(1, 3600);
+    const ready = op(2, -60);
+    const recovery = op(3, -60, {protected: true, calls: [setGuardian()]});
+    const all = [soon, ready, recovery];
+    const ctx = seeded(all, (fn, id) => {
+      const target = all.find((o) => o.id === id);
+      if (!target) return new Error(`unexpected ${fn} ${id}`);
+      if (fn === "getOperationState") return target === soon ? OPERATION_STATE.Waiting : OPERATION_STATE.Ready;
+      return BigInt(target.readyAt);
+    });
+    const {conditions} = await timelockQueueRule.check(ctx, NOW_BLOCK);
+    const byKey = Object.fromEntries(conditions.map((c) => [c.key, c]));
+    const soonAlert = byKey[`ethereum:timelock-queue:${soon.id}:soon`];
+    const readyAlert = byKey[`ethereum:timelock-queue:${ready.id}:ready`];
+    const recoveryAlert = byKey[`ethereum:timelock-queue:${recovery.id}:ready`];
+    expect(field(soonAlert, "Guardian action")).toMatch(/\(value 0\) before \d{4}-\d{2}-\d{2} /);
+    expect(soonAlert?.note).toMatch(/cancel transaction above before the ETA\.$/);
+    expect(field(readyAlert, "Guardian action")).toMatch(
+      /\(value 0\) now: its ETA \(\d{4}-.*\) has passed$/,
+    );
+    expect(readyAlert?.note).toMatch(/cancel transaction above now: it can be cancelled until it is executed\.$/);
+    expect(recoveryAlert?.note).toMatch(/Timelock\.cancel\(id\) now, before it is executed\.$/);
   });
 
   it("refreshes readyAt from getTimestamp", async () => {

@@ -217,6 +217,33 @@ class JitteredTimers implements Timers {
 }
 
 describe("reconciliation blocked", () => {
+  it("holds back reconcile.incomplete for a run blocked by a passing failure", async () => {
+    const t = testDaemon({
+      config: daemonConfig({reconciliation: {enabled: true, intervalSec: 60}, alerts: {transientFailureGraceSec: 60}}),
+      store: seeded(),
+      eventRules: [fillingCcipRule()],
+    });
+    const reads = balanceReads(t.chains.ethereum!, true);
+    balanceReads(t.chains.bsc!);
+    // One blocked run, then a complete one: nothing sent, nothing to resolve.
+    expect((await firstRun(t))?.status).toBe("incomplete");
+    expect(about(t, INCOMPLETE_KEY)).toEqual([]);
+    reads.fail = false;
+    await runUntil(t, 60_000, 60);
+    expect(about(t, INCOMPLETE_KEY)).toEqual([]);
+    expect(t.store.get<HealthState>(HEALTH_NAMESPACE, {}).reconcile?.blockedSince).toBeUndefined();
+
+    // Blocked again: the first run of the span is held back, the next one (60 s into the span) raises the warning.
+    reads.fail = true;
+    await runUntil(t, 120_000, 60);
+    expect(about(t, INCOMPLETE_KEY)).toEqual([]);
+    await runUntil(t, 180_000, 60);
+    expect(about(t, INCOMPLETE_KEY)).toEqual([`firing:warning:${INCOMPLETE_KEY}`]);
+    reads.fail = false;
+    await runUntil(t, 240_000, 60);
+    expect(about(t, INCOMPLETE_KEY)).toEqual([`firing:warning:${INCOMPLETE_KEY}`, `resolved:warning:${INCOMPLETE_KEY}`]);
+  });
+
   it("escalates a finalized balance read failing for 600 s, while the scan and state reads work", async () => {
     const fetch = vi.fn(async () => new Response("ok"));
     const t = testDaemon({
