@@ -30,7 +30,8 @@ interface IDeployedPool {
 /// the real RateLimiter accepts {enabled, 0, 0} from the rate limit admin, the registry path recognizes the pool, and
 /// an owner restoration starts the bucket from zero.
 /// @dev Gated: runs only with RUN_FORK_TESTS=true, otherwise every test is skipped before any RPC is contacted, so a
-/// plain `forge test` never touches the network. Also skipped when the RPC is unreachable.
+/// plain `forge test` never touches the network. Once enabled, an unreachable RPC fails the test instead of skipping it,
+/// so CI cannot report a lockdown check that never ran as passing.
 contract ForkLockdownTest is Test {
   address internal constant TOKEN = 0xFDFfB411C4A70AA7C95D5C981a6Fb4Da867e1111;
   address internal constant POOL = 0x194E4C58DED42b35ed984C8e8F85E854bD1e62B4;
@@ -50,13 +51,8 @@ contract ForkLockdownTest is Test {
     }
   }
 
-  function _fork(string memory envKey, string memory fallbackUrl) internal returns (bool) {
-    string memory url = vm.envOr(envKey, fallbackUrl);
-    try vm.createSelectFork(url) returns (uint256) {
-      return true;
-    } catch {
-      return false;
-    }
+  function _fork(string memory envKey, string memory fallbackUrl) internal {
+    vm.createSelectFork(vm.envOr(envKey, fallbackUrl));
   }
 
   function _single(address account) internal pure returns (address[] memory accounts) {
@@ -129,12 +125,12 @@ contract ForkLockdownTest is Test {
   }
 
   function test_fork_ethereum_lockdownAndRestore() public {
-    if (!_fork("ETH_RPC_URL", "https://ethereum-rpc.publicnode.com")) vm.skip(true);
+    _fork("ETH_RPC_URL", "https://ethereum-rpc.publicnode.com");
     _checkLockdownAndRestore(ETH_REGISTRY, BSC_SELECTOR);
   }
 
   function test_fork_bsc_lockdownAndRestore() public {
-    if (!_fork("BSC_RPC_URL", "https://bsc-dataseed.bnbchain.org")) vm.skip(true);
+    _fork("BSC_RPC_URL", "https://bsc-dataseed.bnbchain.org");
     _checkLockdownAndRestore(BSC_REGISTRY, ETH_SELECTOR);
   }
 }

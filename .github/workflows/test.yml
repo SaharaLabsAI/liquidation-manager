@@ -38,8 +38,10 @@ jobs:
         id: build
 
       - name: Run Forge tests
+        # The fork suites only run in the fork job; everything else must run here with zero skips.
         run: |
-          forge test -vvv
+          .github/scripts/forge-test-no-skips.sh \
+            --no-match-path '{test/fork/*,test/controller-timelock/ForkLockdown.t.sol}' -vvv
         id: test
 
   fork:
@@ -66,5 +68,5 @@ jobs:
         run: |
           export ETH_RPC_URL="${ETH_RPC_SECRET:-https://ethereum-rpc.publicnode.com}"
           export BSC_RPC_URL="${BSC_RPC_SECRET:-https://bsc-dataseed.bnbchain.org}"
-          forge test --match-path 'test/fork/*' -vvv
-          forge test --match-path 'test/controller-timelock/ForkLockdown.t.sol' -vvv
+          .github/scripts/forge-test-no-skips.sh --match-path 'test/fork/*' -vvv
+          .github/scripts/forge-test-no-skips.sh --match-path 'test/controller-timelock/ForkLockdown.t.sol' -vvv
