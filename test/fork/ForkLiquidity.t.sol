@@ -2296,7 +2296,7 @@ contract ForkLiquidityEthTest is ForkLiquidityBase {
 contract ForkLiquidityBscTest is ForkLiquidityBase {
   function _chainConfig() internal view override returns (ChainConfig memory) {
     return ChainConfig({
-      rpcUrl: vm.envOr("BSC_RPC_URL", string("https://bsc-dataseed.bnbchain.org")),
+      rpcUrl: vm.envOr("BSC_RPC_URL", string("https://bsc-rpc.publicnode.com")),
       chainId: 56,
       registry: 0x736Fd8660c443547a85e4Eaf70A49C1b7Bb008fc,
       router: 0x34B03Cb9086d7D758AC55af71584F81A598759FE,
@@ -2323,7 +2323,7 @@ contract ForkCrossChainTest is Test {
       return;
     }
     ethFork = vm.createFork(vm.envOr("ETH_RPC_URL", string("https://ethereum-rpc.publicnode.com")));
-    bscFork = vm.createFork(vm.envOr("BSC_RPC_URL", string("https://bsc-dataseed.bnbchain.org")));
+    bscFork = vm.createFork(vm.envOr("BSC_RPC_URL", string("https://bsc-rpc.publicnode.com")));
   }
 
   function test_fork_crossChain_poolsAreMutualSoleCounterparts() public {

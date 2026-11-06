@@ -130,7 +130,7 @@ contract ForkLockdownTest is Test {
   }
 
   function test_fork_bsc_lockdownAndRestore() public {
-    _fork("BSC_RPC_URL", "https://bsc-dataseed.bnbchain.org");
+    _fork("BSC_RPC_URL", "https://bsc-rpc.publicnode.com");
     _checkLockdownAndRestore(BSC_REGISTRY, ETH_SELECTOR);
   }
 }

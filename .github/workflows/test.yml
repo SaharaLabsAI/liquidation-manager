@@ -67,6 +67,6 @@ jobs:
           BSC_RPC_SECRET: ${{ secrets.BSC_RPC_URL }}
         run: |
           export ETH_RPC_URL="${ETH_RPC_SECRET:-https://ethereum-rpc.publicnode.com}"
-          export BSC_RPC_URL="${BSC_RPC_SECRET:-https://bsc-dataseed.bnbchain.org}"
+          export BSC_RPC_URL="${BSC_RPC_SECRET:-https://bsc-rpc.publicnode.com}"
           .github/scripts/forge-test-no-skips.sh --match-path 'test/fork/*' -vvv
           .github/scripts/forge-test-no-skips.sh --match-path 'test/controller-timelock/ForkLockdown.t.sol' -vvv
