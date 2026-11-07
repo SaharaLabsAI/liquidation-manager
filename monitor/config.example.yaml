@@ -135,6 +135,7 @@ chains:
       largeTransfer: "10000000"
       outflowWindowSec: 3600
       outflowWindowAmount: "30000000"
+      inflowMergeSec: 600 # direct inflows to one endpoint within this of an alerted one: one summary (README "Flows")
     ccip:
       # false makes reconciliation INCOMPLETE; blocks passed while off are a gap, replayed muted once it is back on
       enabled: true
@@ -186,6 +187,7 @@ chains:
       largeTransfer: "10000000"
       outflowWindowSec: 3600
       outflowWindowAmount: "30000000"
+      inflowMergeSec: 600
     ccip:
       enabled: true
       stuckAfterSec: 7200

@@ -90,6 +90,7 @@ export interface FlowsLimits {
   largeTransfer?: string;
   outflowWindowSec?: number;
   outflowWindowAmount?: string;
+  inflowMergeSec?: number;
 }
 
 export function flConfig(limits: FlowsLimits = {}) {

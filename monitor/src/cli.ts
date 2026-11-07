@@ -419,7 +419,8 @@ export async function scanCommand(
   });
   const ctx = createChainContext({
     name: args.chain,
-    chain,
+    // Every transfer on its own: a merged one would wait for a summary that a scan never reaches.
+    chain: {...chain, limits: {...chain.limits, inflowMergeSec: 0}},
     global: config,
     client: io.createClient(args.chain, chain),
     alerter,
