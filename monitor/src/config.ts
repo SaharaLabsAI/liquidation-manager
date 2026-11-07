@@ -168,8 +168,13 @@ const chainSchema = z.object({
       outflowWindowSec: z.number().positive().default(3600),
       /** Outflow over the window at or above this amount (whole tokens) raises high. */
       outflowWindowAmount: amount.optional(),
+      /**
+       * Unexplained inflows from outside the reserves (flows.*-inflow) to one endpoint within this many seconds of an
+       * alerted one are merged into one summary. 0 alerts each on its own.
+       */
+      inflowMergeSec: z.number().int().min(0).default(600),
     })
-    .default({budgetLowPct: 20, outflowWindowSec: 3600}),
+    .default({budgetLowPct: 20, outflowWindowSec: 3600, inflowMergeSec: 600}),
   ccip: z
     .object({
       /** Track SAHARA CCIP messages (in-flight amount I, failed and stuck messages). */

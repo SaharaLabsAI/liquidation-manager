@@ -70,6 +70,8 @@ export interface E2EConfigOptions {
   /** `chains.local.startBlock` (first-start backfill); default: unset. */
   startBlock?: bigint;
   logLevel?: "debug" | "info" | "warn" | "error";
+  /** `chains.local.limits.inflowMergeSec`; default: unset (the config default). */
+  inflowMergeSec?: number;
   /** Last-minute changes to the document before it is written (e.g. `alerts.dailySummaryUtc`). */
   edit?: (document: ConfigDocument) => void;
 }
@@ -139,7 +141,13 @@ export async function writeE2EConfig(options: E2EConfigOptions): Promise<E2EConf
       tokenPaused: false,
       rateLimits: {outbound: wholeTokens(params.rateLimits.outbound), inbound: wholeTokens(params.rateLimits.inbound)},
     },
-    limits: {budgetLowPct: 20, largeTransfer: "1000000", outflowWindowSec: 3600, outflowWindowAmount: "10000000"},
+    limits: {
+      budgetLowPct: 20,
+      largeTransfer: "1000000",
+      outflowWindowSec: 3600,
+      outflowWindowAmount: "10000000",
+      ...(options.inflowMergeSec !== undefined ? {inflowMergeSec: options.inflowMergeSec} : {}),
+    },
     ccip: {enabled: false},
   };
   if (options.startBlock !== undefined) chain.startBlock = Number(options.startBlock);

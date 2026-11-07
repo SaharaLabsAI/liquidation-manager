@@ -1,5 +1,5 @@
 import {getAddress, maxUint256, pad, toFunctionSelector, type Address, type Log} from "viem";
-import {describe, expect, it} from "vitest";
+import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 
 import {liquidityManagerAbi} from "../src/abi/generated.ts";
 import {createStore} from "../src/store.ts";
@@ -18,6 +18,7 @@ import {
   eventLog,
   fakeClient,
   FL,
+  flAddr,
   flAddresses,
   flContext,
   tokens,
@@ -614,5 +615,184 @@ describe("flowsRule: outflow window", () => {
     expect(lastSync(disabled)).toEqual([]);
     expect(enabled.alerter.resolved).toEqual([windowKey(FL.pool)]);
     expect(readFlowsState(disabled).outflows).toEqual({});
+  });
+});
+
+describe("flowsRule: inflow merging", () => {
+  const T0 = 1_800_000_000;
+  const at = (sec: number) => vi.setSystemTime((T0 + sec) * 1000);
+  const summaryKey = (hash: string, logIndex: number) => `ethereum:flows:inflow-summary:${hash}:${logIndex}`;
+
+  beforeEach(() => {
+    vi.useFakeTimers({toFake: ["Date"]});
+    at(0);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("a flood of 10,000 one-wei transfers into the pool: one alert now, one summary after the window", async () => {
+    const ctx = flContext();
+    const flood = new TxBuilder(70, 100n);
+    for (let i = 0; i < 10_000; i++) flood.transfer(FL.stranger, FL.pool, 1n);
+    const alerts = await run(ctx, flood.logs);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      key: `ethereum:flows:${flood.hash}:0`,
+      severity: "high",
+      rule: "flows.pool-inflow",
+      title: "Direct transfer to Pool: 0.000000000000000001 SAHARA",
+    });
+
+    // Still inside the window (599 s): nothing more.
+    at(599);
+    expect(await run(ctx, [], {from: 101n, to: 150n})).toEqual([]);
+
+    at(600);
+    const [summary, ...rest] = await run(ctx, [], {from: 151n, to: 200n});
+    expect(rest).toEqual([]);
+    expect(summary).toMatchObject({
+      key: summaryKey(flood.hash, 0),
+      kind: "event",
+      severity: "high",
+      rule: "flows.pool-inflow",
+      chain: "ethereum",
+      title: "9999 more transfers to Pool merged: 0.000000000000009999 SAHARA in total",
+    });
+    expect(field(summary, "Merged transfers")).toBe("9999 since the one alerted at 2027-01-15 08:00:00 UTC");
+    expect(field(summary, "Total")).toBe("0.000000000000009999 SAHARA (raw 9999)");
+    expect(field(summary, "Largest")).toBe("0.000000000000000001 SAHARA (raw 1)");
+    expect(field(summary, "Senders")).toBe(`${FL.stranger}: 9999`);
+    expect(field(summary, "Blocks")).toBe("100 to 100");
+    expect(summary!.links?.map((link) => link.url)).toEqual([
+      `https://etherscan.io/tx/${flood.hash}`,
+      `https://etherscan.io/address/${FL.pool}`,
+    ]);
+    expect(summary!.note).toMatch(/^Releasable pool inventory grew outside the Manager budgets\..* are merged/);
+    expect(readFlowsState(ctx).inflows).toEqual({});
+
+    // Closed: the next transfer is alerted on its own and opens a new window.
+    const next = new TxBuilder(71, 201n).transfer(FL.stranger, FL.pool, 1n);
+    expect((await run(ctx, next.logs)).map((a) => a.key)).toEqual([`ethereum:flows:${next.hash}:0`]);
+  });
+
+  it("merges per endpoint and keeps each endpoint's rule, severity and note", async () => {
+    const ctx = flContext();
+    const tx = new TxBuilder(72, 100n)
+      .transfer(FL.user, FL.pool, tokens(1))
+      .transfer(FL.user, FL.adapter, tokens(2))
+      .transfer(FL.user, FL.manager, tokens(3))
+      .transfer(FL.user, FL.extra, tokens(4))
+      .transfer(FL.user, FL.pool, tokens(5))
+      .transfer(FL.user, FL.adapter, tokens(6))
+      .transfer(FL.user, FL.manager, tokens(7))
+      .transfer(FL.user, FL.extra, tokens(8));
+    const first = await run(ctx, tx.logs);
+    expect(first.map((a) => [a.severity, a.rule])).toEqual([
+      ["high", "flows.pool-inflow"],
+      ["high", "flows.adapter-inflow"],
+      ["info", "flows.manager-inflow"],
+      ["info", "flows.endpoint-inflow"],
+    ]);
+    at(600);
+    const summaries = await run(ctx, [], {from: 101n, to: 101n});
+    expect(summaries.map((a) => [a.severity, a.rule, a.title])).toEqual([
+      ["high", "flows.pool-inflow", "1 more transfer to Pool merged: 5 SAHARA in total"],
+      ["high", "flows.adapter-inflow", "1 more transfer to Adapter #1 merged: 6 SAHARA in total"],
+      ["info", "flows.manager-inflow", "1 more transfer to Manager merged: 7 SAHARA in total"],
+      ["info", "flows.endpoint-inflow", "1 more transfer to Endpoint 1 merged: 8 SAHARA in total"],
+    ]);
+    expect(summaries[1]!.note).toMatch(/^Unrecoverable: the adapter has no rescue/);
+  });
+
+  it("never merges a transfer at or above limits.largeTransfer, an internal move or an explained inflow", async () => {
+    const ctx = flContext({limits: {largeTransfer: "1000"}});
+    const tx = new TxBuilder(73, 100n)
+      .transfer(FL.stranger, FL.pool, 1n)
+      .transfer(FL.stranger, FL.pool, tokens(1_000))
+      .transfer(FL.legacy, FL.pool, tokens(1))
+      .transfer(FL.manager, FL.pool, tokens(1))
+      .lock(FL.user, tokens(5_000))
+      .transfer(FL.stranger, FL.pool, 2n);
+    const alerts = await run(ctx, tx.logs);
+    expect(alerts.map((a) => [a.rule, field(a, "Amount")])).toEqual([
+      ["flows.pool-inflow", "0.000000000000000001 SAHARA (raw 1)"],
+      ["flows.pool-inflow", `1,000 SAHARA (raw ${tokens(1_000)})`],
+      ["flows.endpoint-outflow", `1 SAHARA (raw ${tokens(1)})`],
+      ["flows.manager-outflow", `1 SAHARA (raw ${tokens(1)})`],
+      ["flows.large-transfer", `5,000 SAHARA (raw ${tokens(5_000)})`],
+    ]);
+    at(600);
+    const [summary] = await run(ctx, [], {from: 101n, to: 101n});
+    expect(field(summary, "Total")).toBe("0.000000000000000002 SAHARA (raw 2)");
+  });
+
+  it("names the first five senders and counts the rest together", async () => {
+    const ctx = flContext();
+    const tx = new TxBuilder(74, 100n).transfer(FL.stranger, FL.pool, 1n);
+    const senders = [1, 2, 3, 4, 5, 6, 7].map((n) => flAddr(0x900 + n));
+    for (const sender of senders) tx.transfer(sender, FL.pool, 1n).transfer(sender, FL.pool, 3n);
+    await run(ctx, tx.logs);
+    at(600);
+    const [summary] = await run(ctx, [], {from: 101n, to: 101n});
+    expect(summary!.title).toBe("14 more transfers to Pool merged: 0.000000000000000028 SAHARA in total");
+    expect(field(summary, "Largest")).toBe("0.000000000000000003 SAHARA (raw 3)");
+    expect(field(summary, "Senders")).toBe(
+      [...senders.slice(0, 5).map((sender) => `${sender}: 2`), "other senders: 4"].join(", "),
+    );
+  });
+
+  it("a transfer after the window closes the old one first: its summary, then the transfer on its own", async () => {
+    const ctx = flContext();
+    const a = new TxBuilder(75, 100n).transfer(FL.stranger, FL.pool, 1n).transfer(FL.stranger, FL.pool, 1n);
+    await run(ctx, a.logs);
+    at(700);
+    const b = new TxBuilder(76, 150n).transfer(FL.user, FL.pool, 7n);
+    const alerts = await run(ctx, b.logs);
+    expect(alerts.map((alert) => alert.key)).toEqual([summaryKey(a.hash, 0), `ethereum:flows:${b.hash}:0`]);
+    expect(readFlowsState(ctx).inflows?.[FL.pool]).toMatchObject({openedAt: T0 + 700, first: `${b.hash}:0`, count: 0});
+  });
+
+  it("a window with nothing merged closes without a summary", async () => {
+    const ctx = flContext();
+    await run(ctx, new TxBuilder(77, 100n).transfer(FL.stranger, FL.pool, 1n).logs);
+    expect(readFlowsState(ctx).inflows?.[FL.pool]).toBeDefined();
+    at(600);
+    expect(await run(ctx, [], {from: 101n, to: 101n})).toEqual([]);
+    expect(readFlowsState(ctx).inflows).toEqual({});
+  });
+
+  it("open windows survive a restart, and the outflow window turned off keeps them", async () => {
+    const store = createStore();
+    const before = flContext({store, limits: {outflowWindowAmount: "1"}});
+    const tx = new TxBuilder(78, 100n)
+      .release(FL.user, tokens(5))
+      .transfer(FL.stranger, FL.pool, 1n)
+      .transfer(FL.stranger, FL.pool, 1n);
+    expect((await run(before, tx.logs)).map((a) => a.rule)).toEqual(["flows.pool-inflow"]);
+
+    const after = flContext({store});
+    expect(await run(after, [], {from: 101n, to: 101n})).toEqual([]);
+    expect(readFlowsState(after).outflows).toEqual({});
+    at(600);
+    expect((await run(after, [], {from: 102n, to: 102n})).map((a) => a.key)).toEqual([
+      summaryKey(tx.hash, tx.logs.length - 2),
+    ]);
+  });
+
+  it("inflowMergeSec 0 alerts each transfer and closes the windows left open", async () => {
+    const store = createStore();
+    const tx = new TxBuilder(79, 100n).transfer(FL.stranger, FL.pool, 1n).transfer(FL.stranger, FL.pool, 1n);
+    await run(flContext({store}), tx.logs);
+
+    const off = flContext({store, limits: {inflowMergeSec: 0}});
+    const more = new TxBuilder(80, 101n).transfer(FL.stranger, FL.pool, 1n).transfer(FL.stranger, FL.pool, 1n);
+    const alerts = await run(off, more.logs);
+    expect(alerts.map((a) => a.key)).toEqual([
+      `ethereum:flows:${more.hash}:0`,
+      `ethereum:flows:${more.hash}:1`,
+      summaryKey(tx.hash, 0),
+    ]);
+    expect(readFlowsState(off).inflows).toEqual({});
   });
 });

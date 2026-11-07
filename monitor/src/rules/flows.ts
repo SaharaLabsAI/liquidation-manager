@@ -6,6 +6,8 @@
 // emit a look-alike event), amounts must match exactly, and each explanation accounts for one transfer, so a second
 // transfer hidden in a fund transaction is still flagged. Pool outflows also feed a per-pool sliding window (store
 // namespace `flows:${chain}`) that raises a condition when the total reaches `limits.outflowWindowAmount`.
+// Unexplained inflows from outside the reserves, which anyone holding 1 wei can send, are merged per receiving endpoint
+// over `limits.inflowMergeSec` (same namespace), so a flood of them cannot bury other alerts (see `InflowMerger`).
 import {decodeEventLog, encodeEventTopics, getAddress, maxUint256, pad, type Address, type Hex, type Log} from "viem";
 
 import {saharaTokenAbi, tokenPoolAbi} from "../abi/external.ts";
@@ -528,7 +530,13 @@ function approvalAlert(ctx: ChainContext, scan: TxScan, approval: TokenApproval)
   };
 }
 
-function processTx(ctx: ChainContext, hash: Hex, txLogs: readonly Log[], outflows: PoolOutflow[]): void {
+function processTx(
+  ctx: ChainContext,
+  hash: Hex,
+  txLogs: readonly Log[],
+  outflows: PoolOutflow[],
+  inflows: InflowMerger,
+): void {
   const scan = decodeTx(ctx, hash, txLogs);
   for (const transfer of scan.transfers) {
     // Zero-value transfers move nothing, and OZ v5 lets anyone emit one from any address (address poisoning).
@@ -537,6 +545,7 @@ function processTx(ctx: ChainContext, hash: Hex, txLogs: readonly Log[], outflow
     const toKind = endpointKind(ctx, transfer.to);
     if (!fromKind && !toKind) continue;
     const findings: Finding[] = [];
+    let mergeable = false;
     if (fromKind) {
       const explanation = take(scan, transfer.from, "out", transfer.to, transfer.value);
       const finding = classifyOutflow(ctx, fromKind, transfer, explanation);
@@ -555,8 +564,12 @@ function processTx(ctx: ChainContext, hash: Hex, txLogs: readonly Log[], outflow
       const explanation = take(scan, transfer.to, "in", transfer.from, transfer.value);
       const finding = classifyInflow(ctx, toKind, transfer, explanation);
       if (finding) findings.push(finding);
+      // Unexplained and from outside the reserves: the receiver's finding is the only one, and anyone can raise it.
+      mergeable = !fromKind && !explanation && finding !== undefined;
     }
-    if (findings.length) ctx.alerter.emit(transferAlert(ctx, scan, transfer, findings));
+    if (!findings.length) continue;
+    if (mergeable && inflows.merge(transfer, findings[0]!)) continue;
+    ctx.alerter.emit(transferAlert(ctx, scan, transfer, findings));
   }
   for (const approval of scan.approvals) {
     if (approval.value === 0n || !endpointKind(ctx, approval.owner)) continue;
@@ -576,6 +589,150 @@ function processTx(ctx: ChainContext, hash: Hex, txLogs: readonly Log[], outflow
 }
 
 // ----------------------------------------------------------------------------------------------------------------
+// Inflow merging
+// ----------------------------------------------------------------------------------------------------------------
+
+/** Senders named in a merge summary; the transfers of any others are counted together. */
+const MAX_SUMMARY_SENDERS = 5;
+
+/** An endpoint's open merge window: the transfer that opened it was alerted on its own, the later ones are counted. */
+export interface InflowWindow {
+  /** Unix seconds (wall clock) it opened. */
+  openedAt: number;
+  /** `${txHash}:${logIndex}` of the transfer that opened it. */
+  first: string;
+  /** That transfer's finding, which the summary repeats. */
+  severity: Severity;
+  rule: string;
+  note?: string;
+  /** Transfers merged since. */
+  count: number;
+  total: bigint;
+  largest: bigint;
+  /** Merged transfers per checksummed sender, for the first MAX_SUMMARY_SENDERS senders. */
+  senders: Record<string, number>;
+  /** Merged transfers from the other senders. */
+  otherSenders: number;
+  firstBlock?: bigint;
+  lastBlock?: bigint;
+  lastTx?: Hex;
+}
+
+/**
+ * Merges unexplained inflows from outside the reserves per receiving endpoint. The first one is alerted on its own at
+ * once and opens a window of `limits.inflowMergeSec`; the later ones within it are counted, and reported in one summary
+ * at the first range scanned after the window closed. A flood of 1-wei transfers then costs two messages per endpoint
+ * and window instead of one per transfer, so it can no longer delay the alerts queued behind it by hours. Transfers at
+ * or above `limits.largeTransfer` are never merged. The window runs on the wall clock, not block time, so a backlog
+ * scanned after downtime is merged too. A range rescanned after a crash may be counted twice in the summary.
+ */
+class InflowMerger {
+  readonly #ctx: ChainContext;
+  readonly #windows: Record<string, InflowWindow>;
+  readonly #windowSec: number;
+  readonly #large: bigint | undefined;
+  readonly #now = nowSec();
+  /** A window opened, merged a transfer or closed: the state needs saving. */
+  changed = false;
+
+  constructor(ctx: ChainContext, windows: Record<string, InflowWindow>) {
+    this.#ctx = ctx;
+    this.#windows = windows;
+    this.#windowSec = ctx.config.limits.inflowMergeSec;
+    this.#large = largeThreshold(ctx);
+  }
+
+  /** Whether `transfer` was merged into its endpoint's open window; if not, alert it (it may have opened one). */
+  merge(transfer: TokenTransfer, finding: Finding): boolean {
+    if (this.#windowSec <= 0 || (this.#large !== undefined && transfer.value >= this.#large)) return false;
+    // Both addresses are checksummed (decodeTx).
+    const {log, from, to: endpoint, value} = transfer;
+    const open = this.#windows[endpoint];
+    if (open && !this.#expired(open)) {
+      open.count++;
+      open.total += value;
+      if (value > open.largest) open.largest = value;
+      if (from in open.senders || Object.keys(open.senders).length < MAX_SUMMARY_SENDERS) {
+        open.senders[from] = (open.senders[from] ?? 0) + 1;
+      } else open.otherSenders++;
+      if (log.blockNumber !== null) {
+        open.firstBlock ??= log.blockNumber;
+        open.lastBlock = log.blockNumber;
+      }
+      if (log.transactionHash) open.lastTx = log.transactionHash;
+      this.changed = true;
+      return true;
+    }
+    if (open) this.#close(endpoint, open);
+    this.#windows[endpoint] = {
+      openedAt: this.#now,
+      first: `${log.transactionHash}:${log.logIndex}`,
+      severity: finding.severity,
+      rule: finding.rule,
+      ...(finding.note ? {note: finding.note} : {}),
+      count: 0,
+      total: 0n,
+      largest: 0n,
+      senders: {},
+      otherSenders: 0,
+    };
+    this.changed = true;
+    return false;
+  }
+
+  /** Closes the windows that expired (every window while merging is off), each with its summary if it merged any. */
+  closeExpired(): void {
+    for (const [endpoint, window] of Object.entries(this.#windows)) {
+      if (this.#windowSec <= 0 || this.#expired(window)) this.#close(endpoint, window);
+    }
+  }
+
+  #expired(window: InflowWindow): boolean {
+    return this.#now >= window.openedAt + this.#windowSec;
+  }
+
+  #close(endpoint: string, window: InflowWindow): void {
+    delete this.#windows[endpoint];
+    this.changed = true;
+    if (window.count > 0) this.#ctx.alerter.emit(inflowSummary(this.#ctx, getAddress(endpoint), window));
+  }
+}
+
+function inflowSummary(ctx: ChainContext, endpoint: Address, window: InflowWindow): Alert {
+  const name = ctx.label(endpoint);
+  const senders = Object.entries(window.senders).map(([sender, count]) => `${ctx.label(sender as Address)}: ${count}`);
+  if (window.otherSenders) senders.push(`other senders: ${window.otherSenders}`);
+  const fields: AlertField[] = [
+    addressField(ctx, "To", endpoint),
+    {label: "Merged transfers", value: `${window.count} since the one alerted at ${formatTimestamp(window.openedAt)}`},
+    {label: "Total", value: `${amountText(ctx, window.total)} (raw ${window.total})`, code: true},
+    {label: "Largest", value: `${amountText(ctx, window.largest)} (raw ${window.largest})`, code: true},
+    {label: "Senders", value: senders.join(", ")},
+  ];
+  if (window.firstBlock !== undefined && window.lastBlock !== undefined) {
+    fields.push({label: "Blocks", value: `${window.firstBlock} to ${window.lastBlock}`});
+  }
+  const links: AlertLink[] = window.lastTx ? [{...txLink(ctx, window.lastTx), label: "Last transaction"}] : [];
+  links.push(addressLink(ctx, endpoint));
+  const merging =
+    "Unexplained transfers into a reserve endpoint from outside the reserves are merged: after one is alerted, the " +
+    "others within limits.inflowMergeSec are summarized here (at or above limits.largeTransfer, never).";
+  return {
+    key: `${ctx.name}:${RULE}:inflow-summary:${window.first}`,
+    kind: "event",
+    severity: window.severity,
+    rule: window.rule,
+    chain: ctx.name,
+    title:
+      `${window.count} more transfer${window.count === 1 ? "" : "s"} to ${name} merged: ` +
+      `${amountText(ctx, window.total)} in total`,
+    fields,
+    links,
+    note: window.note ? `${window.note} ${merging}` : merging,
+  };
+}
+
+// ----------------------------------------------------------------------------------------------------------------
 // Outflow window
 // ----------------------------------------------------------------------------------------------------------------
 
@@ -591,11 +748,13 @@ export interface OutflowEntry {
 export interface FlowsState {
   /** Pool outflows still inside the window, by checksummed pool address. */
   outflows: Record<string, OutflowEntry[]>;
+  /** Open inflow merge windows, by checksummed endpoint address (see `InflowMerger`). */
+  inflows?: Record<string, InflowWindow>;
 }
 
 export function readFlowsState(ctx: Pick<ChainContext, "store" | "name">): FlowsState {
   const state = ctx.store.get<FlowsState>(flowsNamespace(ctx.name), {outflows: {}});
-  return {outflows: state.outflows ?? {}};
+  return {outflows: state.outflows ?? {}, inflows: state.inflows ?? {}};
 }
 
 const OUTFLOW_KIND_LABEL: Record<OutflowEntry["kind"], string> = {
@@ -675,7 +834,7 @@ async function updateOutflowWindow(
   const {outflowWindowAmount, outflowWindowSec} = ctx.config.limits;
   const state = readFlowsState(ctx);
   if (outflowWindowAmount === undefined) {
-    if (Object.keys(state.outflows).length) ctx.store.set<FlowsState>(namespace, {outflows: {}});
+    if (Object.keys(state.outflows).length) ctx.store.set<FlowsState>(namespace, {...state, outflows: {}});
     ctx.alerter.sync(scope, []);
     return;
   }
@@ -762,6 +921,8 @@ export const flowsRule: EventRule = {
   },
   async onLogs(ctx: ChainContext, logs: Log[], range: BlockRange): Promise<void> {
     const outflows: PoolOutflow[] = [];
+    const state = readFlowsState(ctx);
+    const inflows = new InflowMerger(ctx, (state.inflows ??= {}));
     const {token, manager, pools} = ctx.addresses;
     const relevant = logs.filter(
       (log) =>
@@ -770,11 +931,19 @@ export const flowsRule: EventRule = {
     );
     for (const [hash, txLogs] of groupByTx(relevant)) {
       try {
-        processTx(ctx, hash, txLogs, outflows);
+        processTx(ctx, hash, txLogs, outflows, inflows);
       } catch (error) {
         ctx.log.warn("flows: failed to process transaction", {error, tx: hash});
       }
     }
+    // Every range, also without logs, so a window's summary goes out once it closed. Saved before the outflow window
+    // reads the namespace.
+    try {
+      inflows.closeExpired();
+    } catch (error) {
+      ctx.log.warn("flows: inflow merge summaries failed", {error});
+    }
+    if (inflows.changed) ctx.store.set<FlowsState>(flowsNamespace(ctx.name), state);
     // After the transfer alerts, so a block-time failure can never suppress them.
     try {
       await updateOutflowWindow(ctx, outflows, logs, range);

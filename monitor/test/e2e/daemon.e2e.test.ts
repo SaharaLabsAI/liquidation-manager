@@ -133,8 +133,9 @@ describe.skipIf(!anvilAvailable())("e2e daemon (node src/cli.ts run)", () => {
       d.addresses.manager,
       encodeManager("setMaxFundingPerCall", [tokens(4_000_000)]),
     );
-    // Backfill exactly the pre-start schedule: the setup history before it is not replayed.
-    e2e = await writeE2EConfig({deployment: d, telegram, startBlock: d.readyBlock + 1n});
+    // Backfill exactly the pre-start schedule: the setup history before it is not replayed. Several scenarios each
+    // expect their own direct pool transfer alerted on its own, minutes apart: no merging (inflow-flood covers it).
+    e2e = await writeE2EConfig({deployment: d, telegram, startBlock: d.readyBlock + 1n, inflowMergeSec: 0});
   });
 
   afterAll(async () => {

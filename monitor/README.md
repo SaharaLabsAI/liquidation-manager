@@ -435,6 +435,7 @@ The file is YAML (JSON also works), validated at start-up. It is read from `--co
 | `limits.largeTransfer` | unset | A single bridge lock or release at or above this raises a warning. |
 | `limits.outflowWindowSec` | `3600` | Sliding window for pool outflows. |
 | `limits.outflowWindowAmount` | unset (window off) | Pool outflow within the window at or above this raises `flows.outflow-window` (high). |
+| `limits.inflowMergeSec` | `600` | Unexplained inflows from outside the reserves to one endpoint within this many seconds of an alerted one are merged into one summary (see [Flows](#flows)). `0` alerts each on its own. |
 | `ccip.enabled` | `true` | Track SAHARA CCIP messages (needed for `I`, failed and stuck messages). `false` makes reconciliation blocking-incomplete, and open `<chain>:ccip:*` conditions are dropped at the next start. Being an operator choice, it stays the `reconcile.incomplete` warning and does not count toward `health.reconcile-stale`. Turning it on again leaves the blocks scanned meanwhile as a gap, which keeps reconciliation INCOMPLETE until the daemon has replayed it (see [Skipped CCIP blocks](#skipped-ccip-blocks)). |
 | `ccip.stuckAfterSec` | `7200` | A message sent from this chain and not executed after this long raises `reconcile.stuck-message`. |
 
@@ -873,19 +874,33 @@ One alert is raised per unexplained transfer. Its severity is the higher of the 
 and each finding is listed as `Check (<severity>)`. Explanations count only if the Manager or a watched pool emitted
 them with the exact amount, and each explanation accounts for one transfer. Zero-value transfers are ignored.
 
+Anyone holding 1 wei of SAHARA can raise the four `*-inflow` rules, so their unexplained transfers from outside the
+reserves are merged per receiving endpoint. Without merging, a flood of 10,000 dust transfers (one block, about 40M
+gas) would be 10,000 high messages, and at Telegram's 20 messages per minute per chat every alert raised after them
+would wait about 8 hours. With merging:
+
+- The first such transfer to an endpoint is alerted on its own at once and opens a window of `limits.inflowMergeSec`
+  (wall clock, default 10 minutes).
+- Later ones to that endpoint within the window are counted, not alerted. Once the window has closed, the next scanned
+  range sends one summary under the same rule and severity: the number of merged transfers, their total, the largest,
+  the senders and the blocks.
+- A transfer at or above `limits.largeTransfer` is always alerted on its own. So is any transfer with a reserve endpoint
+  as the sender (an internal move).
+- `scan` does not merge: it prints every transfer.
+
 | Rule | Kind | Severity | Meaning | First action |
 | --- | --- | --- | --- | --- |
 | `flows.manager-outflow` | event | critical | SAHARA left the Manager without a matching `Funded` (to its adapter) or `ReservesMigrated`. | Treat it as a compromise. Check the token owner and `paused()`, the Manager owner, and the transaction. |
 | `flows.adapter-outflow` | event | critical | SAHARA left an adapter outside `fund`/`recall`. | Inspect the transaction now. |
 | `flows.pool-outflow` | event | critical | SAHARA left a pool without `ReleasedOrMinted` (bridge release) or `LiquidityRemoved`. | See [Unexpected pool outflow](#runbook-mapping). |
-| `flows.pool-inflow` | event | high | Direct transfer to a pool without `LiquidityAdded`, `LiquidityTransferred` or a bridge lock. It bypasses `provideLiquidity` and increases releasable inventory outside the budgets. | Identify the sender. Check reconciliation. |
-| `flows.adapter-inflow` | event | high | SAHARA sent directly to an adapter. It is unrecoverable: the adapter has no rescue function. | Exclude it from capacity planning. Find the sender. |
+| `flows.pool-inflow` | event | high | Direct transfer to a pool without `LiquidityAdded`, `LiquidityTransferred` or a bridge lock. It bypasses `provideLiquidity` and increases releasable inventory outside the budgets. Merged (see above). | Identify the sender. Check reconciliation. |
+| `flows.adapter-inflow` | event | high | SAHARA sent directly to an adapter. It is unrecoverable: the adapter has no rescue function. Merged (see above). | Exclude it from capacity planning. Find the sender. |
 | `flows.endpoint-outflow` | event | high | Outflow from a legacy wallet or extra endpoint to anything but the Manager. | Confirm with the wallet owners. |
 | `flows.approval` | event | high | An endpoint approved a spender. The only exception is the adapter's approval to its pool inside `Funded`, which is reset in the same call. | Confirm the intent and revoke the approval if it is unexpected. |
 | `flows.large-transfer` | event | warning | A single bridge lock or release at or above `limits.largeTransfer`. | Check the matching leg on the other chain. |
 | `flows.reserve-migration` | event | info | A legacy wallet or extra endpoint sent SAHARA to the Manager (handover step 3). | None. |
-| `flows.manager-inflow` | event | info | Inflow to the Manager outside a recall. | None if expected (e.g. migration). |
-| `flows.endpoint-inflow` | event | info | Inflow to a legacy wallet or extra endpoint. | None if expected. |
+| `flows.manager-inflow` | event | info | Inflow to the Manager outside a recall. Merged (see above). | None if expected (e.g. migration). |
+| `flows.endpoint-inflow` | event | info | Inflow to a legacy wallet or extra endpoint. Merged (see above) when the sender is not a reserve endpoint. | None if expected. |
 | `flows.outflow-window` | condition | high | Pool outflows within `limits.outflowWindowSec` reached `limits.outflowWindowAmount`. All outflow kinds count: releases, recalls, withdrawals and unexplained. Resolves when the window drains. | Check releases against source-chain locks. If they are not backed: Guardian lockdown and `pauseRecall()`. |
 
 ### Live-state checks
