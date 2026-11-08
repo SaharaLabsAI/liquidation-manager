@@ -58,13 +58,22 @@ export interface LogNodeOptions {
   delayMs?: number;
   /** Extra copies returned for every matching log (duplicates across responses). */
   echo?: (log: RpcLog) => RpcLog[];
+  /** Queries matching more logs than this are rejected, whatever their range (like Infura's 10,000-result cap). */
+  maxResults?: number;
+  /** eth_getBlockReceipts: false rejects it (a provider without the method); a function rewrites the answer. */
+  receipts?: false | ((block: bigint, receipts: unknown[]) => unknown);
 }
 
-/** In-memory eth_getLogs with provider-like failures; records every call and the peak number of calls in flight. */
+/**
+ * In-memory eth_getLogs (and eth_getBlockReceipts, one receipt per transaction) with provider-like failures; records
+ * every call and the peak number of calls in flight.
+ */
 export function createLogNode(logs: RpcLog[], options: LogNodeOptions = {}) {
   const calls: GetLogsCall[] = [];
+  const receiptCalls: bigint[] = [];
   const stats = {inFlight: 0, maxInFlight: 0};
   const request = async ({method, params}: {method: string; params: unknown[]}): Promise<unknown> => {
+    if (method === "eth_getBlockReceipts") return blockReceipts(BigInt(params[0] as Hex));
     if (method !== "eth_getLogs") throw new Error(`unexpected method ${method}`);
     const filter = params[0] as {address: Address | Address[]; topics?: Topics; fromBlock: Hex; toBlock: Hex};
     const from = BigInt(filter.fromBlock);
@@ -79,17 +88,37 @@ export function createLogNode(logs: RpcLog[], options: LogNodeOptions = {}) {
         throw Object.assign(new Error("query returned more than 10000 results"), {code: -32005});
       }
       if (options.failBlocks?.some((block) => block >= from && block <= to)) throw new Error("upstream timeout");
-      call.ok = true;
       const matches = logs.filter((log) => {
         const block = BigInt(log.blockNumber ?? "0x0");
         return block >= from && block <= to && matchesFilter(log, filter.address, filter.topics);
       });
+      if (options.maxResults !== undefined && matches.length > options.maxResults) {
+        throw Object.assign(new Error(`query returned more than ${options.maxResults} results`), {code: -32005});
+      }
+      call.ok = true;
       return matches.flatMap((log) => [log, ...(options.echo?.(log) ?? [])]);
     } finally {
       stats.inFlight--;
     }
   };
-  return {client: {request} as unknown as PublicClient, calls, stats};
+  const blockReceipts = async (block: bigint): Promise<unknown> => {
+    receiptCalls.push(block);
+    if (options.receipts === false) throw new Error("the method eth_getBlockReceipts does not exist/is not available");
+    const byTx = new Map<string, RpcLog[]>();
+    for (const log of logs) {
+      if (BigInt(log.blockNumber ?? "0x0") !== block) continue;
+      const tx = log.transactionHash ?? "0x";
+      byTx.set(tx, [...(byTx.get(tx) ?? []), log]);
+    }
+    const receipts = [...byTx].map(([transactionHash, txLogs]) => ({
+      blockNumber: numberToHex(block),
+      transactionHash,
+      status: "0x1",
+      logs: txLogs,
+    }));
+    return options.receipts ? options.receipts(block, receipts) : receipts;
+  };
+  return {client: {request} as unknown as PublicClient, calls, receiptCalls, stats};
 }
 
 function matchesFilter(log: RpcLog, address: Address | Address[], topics: Topics | undefined): boolean {

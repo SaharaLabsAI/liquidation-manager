@@ -400,6 +400,7 @@ The file is YAML (JSON also works), validated at start-up. It is read from `--co
 | `chainSelector` | required | CCIP chain selector (decimal). Ethereum `5009297550715157269`, BSC `11344663589394136015`. The other configured chains' selectors define the counterpart lane. |
 | `rpcUrls` | required (one or more) | Fallback list, sticky: a request starts at the URL that answered last, and on failure tries the next URLs in order, wrapping around. A recovered earlier URL is used again only after the current one fails. See [RPC requirements](#rpc-requirements). |
 | `rpcTimeoutMs` | `20000` | Per-request timeout. |
+| `rpcReceiptsTimeoutMs` | `120000` | Timeout of `eth_getBlockReceipts`, which reads a block whose logs exceed the provider's result cap (see [RPC requirements](#rpc-requirements)). A block flooded with 15,000 dust transfers has about 10 MB of receipts. |
 | `rpcRetryCount` | `2` | Retries per URL before moving on to the next. |
 | `explorerUrl` | required | Block explorer base for transaction and address links. |
 | `confirmations` | `3` | Logs and state are processed at the confirmed head (`latest − confirmations`). |
@@ -543,11 +544,23 @@ reconciliation:
 
 - **`eth_getLogs` over `maxLogRange` blocks**, with address arrays and topic OR-arrays. A range the provider rejects
   is halved, down to single blocks. This costs requests and time. Splitting is depth-first: on a provider that
-  rejects every request (rate limit, outage), the first single block fails after a few dozen requests. If a single
-  block fails, the scan stops, the cycle fails and is retried with backoff (the poll interval, doubled per failure,
-  at most 5 min). Free public endpoints usually reject large ranges. In our tests `eth.drpc.org` accepted
-  about 100 blocks, `bsc-dataseed` rejected 5000 and `1rpc.io` allowed 50. Use a provider or node that serves the
-  configured range, and set `maxLogRange` to what it allows (paid providers usually allow 2000 or more).
+  rejects every request (rate limit, outage), the first single block fails after a few dozen requests. Free public
+  endpoints usually reject large ranges. In our tests `eth.drpc.org` accepted about 100 blocks, `bsc-dataseed`
+  rejected 5000 and `1rpc.io` allowed 50. Use a provider or node that serves the configured range, and set
+  `maxLogRange` to what it allows (paid providers usually allow 2000 or more).
+- **`eth_getBlockReceipts` for a block `eth_getLogs` cannot serve.** Some providers cap the results of one query
+  whatever its range: Infura returns at most 10,000 logs, also for a single block. Anyone can fill one block past
+  that: one contract call that moves 1 wei to the pool 15,000 times costs about 60M gas. So a single block that still
+  fails is read from its receipts (`eth_getBlockReceipts`, once per block, with its own timeout
+  `rpcReceiptsTimeoutMs`), and its logs are filtered as `eth_getLogs` would. A null topic position beyond a log's
+  topics matches, since providers disagree on it. The receipts are used only if at least 1,000 of their logs match
+  the failing query. Fewer cannot have hit any provider's result cap, so `eth_getLogs` itself is failing (rate limit,
+  outage, method disabled), and the scan gives up as below rather than read every block from receipts. When the
+  receipts are used, the warn log `eth_getLogs failed for a single block; read its logs from eth_getBlockReceipts`
+  names the block. Infura, Alchemy, QuickNode and NodeReal document the method on Ethereum and BSC.
+- **When a single block fails**, through the receipts too or with too few matching logs, the scan stops, the cycle
+  fails and is retried with backoff (the poll interval, doubled per failure, at most 5 min). The error names the block
+  and the reasons (`Last error` of `health.stale-telemetry`).
 - **`eth_call` at recent blocks.** State rules read at the confirmed head. Reconciliation reads balances at the
   `finalized` block, or at the confirmed head if the tag is not supported. The node must keep state for recent blocks,
   not only the latest one. Reads that keep failing (a pruned node, a rate limit, a view that reverts) make the chain

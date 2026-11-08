@@ -77,6 +77,11 @@ const chainSchema = z.object({
   rpcUrls: z.array(z.string().url()).min(1),
   /** Per-request RPC timeout. */
   rpcTimeoutMs: z.number().int().positive().default(20_000),
+  /**
+   * Timeout of eth_getBlockReceipts, which reads a block whose logs exceed the provider's result cap; its receipts can
+   * be megabytes.
+   */
+  rpcReceiptsTimeoutMs: z.number().int().positive().default(120_000),
   /** Retries per RPC URL before falling back to the next one. */
   rpcRetryCount: z.number().int().min(0).default(2),
   explorerUrl: z.string().url(),

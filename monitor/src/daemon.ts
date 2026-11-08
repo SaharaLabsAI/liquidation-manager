@@ -446,7 +446,12 @@ export class Daemon {
     const createClient =
       options.createClient ??
       ((name: string, chain: ChainConfig) =>
-        createChainClient(chain, {name, timeoutMs: chain.rpcTimeoutMs, retryCount: chain.rpcRetryCount}));
+        createChainClient(chain, {
+          name,
+          timeoutMs: chain.rpcTimeoutMs,
+          receiptsTimeoutMs: chain.rpcReceiptsTimeoutMs,
+          retryCount: chain.rpcRetryCount,
+        }));
     this.#chains = Object.entries(config.chains).map(([name, chain]) => {
       const chainLog = log.child({chain: name});
       const ctx = createChainContext({
