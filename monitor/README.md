@@ -600,6 +600,11 @@ reconciliation:
   2. Alerts are muted: event alerts are counted, not sent, and no condition is opened or resolved.
   3. Progress (`backfill.next`) is saved after each chunk, so a crash resumes where it stopped.
   4. Then the cursor becomes `h` and normal processing starts at `h + 1`.
+  5. Right after the start-up message, each Timelock operation the backfill found still pending (neither executed
+     nor cancelled) is alerted once, in scheduling order, since its scheduling was muted. The alert is a
+     `timelock.scheduled` at the operation's severity, titled "Timelock operation pending since before the monitor
+     started", with when and in which block it was scheduled, its ETA, the decoded calls and the cancel instruction.
+     This happens only when the backfill completes, never on a later restart.
 - Without `startBlock`, the cursor starts at `h − 1`. The first normal range is `[h, h]` and nothing earlier is
   tracked.
 
@@ -643,8 +648,9 @@ the open conditions dropped at this start because no rule evaluates them any mor
 [Delivery behaviour](#delivery-behaviour-srcalertstelegramts-srcalertsmanagerts)).
 
 `check` shows the pending operations count and the next ETA. The next ETA reads "(executable now)" once it has
-passed, even for an operation still blocked by its predecessor. A pending operation more than 24 h from its ETA raises
-nothing until it enters the 24 h window. To see its full `timelock.scheduled` alert and cancel calldata now, run
+passed, even for an operation still blocked by its predecessor. A pending operation found by the first-start backfill
+is alerted once with its cancel calldata (step 5 under First start); otherwise, more than 24 h from its ETA, it raises
+nothing until it enters the 24 h window. To see its full `timelock.scheduled` alert and cancel calldata again, run
 `scan` over its scheduling block.
 
 **Choosing `startBlock`.** Use the earliest of these blocks:
@@ -771,6 +777,7 @@ family, not the dotted id. The families are `manager`, `controller`, `pool`, `to
     transaction (schedule, cancel and schedule again in one Safe multiSend);
   - a proposal the monitor could not decode: `<chain>:timelock:scheduled:<id>:<txHash>`, with the same `:<n>` suffix
     for n >= 1;
+  - an operation still pending after the first-start backfill: `<chain>:timelock:pending-at-start:<id>:<txHash>`;
   - a replayed chunk reuses the keys the transaction's schedulings were first alerted under (the first one is stored
     with the operation, the later ones follow from the transaction hash and their ordinal);
   - `<chain>:timelock:executed:<id>`;

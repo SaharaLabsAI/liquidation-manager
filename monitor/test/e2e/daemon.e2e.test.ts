@@ -193,12 +193,22 @@ describe.skipIf(!anvilAvailable())("e2e daemon (node src/cli.ts run)", () => {
     expect(started.text).toContain("Pending Timelock operations known: 1");
     expect(started.text).toContain("Historical event alerts suppressed: 1");
 
-    // First cycle saved: nothing but the startup message and the conditions the mocks always raise.
+    // First cycle saved: the startup message, right after it the pre-start operation (pending, never alerted: the
+    // backfill is muted) with when it was scheduled, and the conditions the mocks always raise.
     await caughtUp(head);
     expect(mock().messages.map(ruleOf).sort()).toEqual(
-      ["health.started", ...KNOWN_MOCK_CONDITIONS.map((condition) => condition.rule)].sort(),
+      ["health.started", "timelock.scheduled", ...KNOWN_MOCK_CONDITIONS.map((condition) => condition.rule)].sort(),
     );
-    for (const message of mock().messages.filter((m) => ruleOf(m) !== "health.started")) {
+    const pending = mock().messages[1]!;
+    expect(firstLine(pending.text)).toBe(
+      `${HEADER.high} · ${CHAIN} · <b>Timelock operation pending since before the monitor started: ` +
+        "LiquidityManager.setMaxFundingPerCall</b>",
+    );
+    expect(pending.text).toContain(preStart.id);
+    expect(pending.text).toContain(`(block ${preStart.receipt.blockNumber})`);
+    expect(pending.text).toContain("before this monitor's first start");
+    const conditions = mock().messages.filter((m) => !["health.started", "timelock.scheduled"].includes(ruleOf(m)!));
+    for (const message of conditions) {
       expect(firstLine(message.text).startsWith(`${HEADER.warning} · ${CHAIN} · `)).toBe(true);
     }
 
@@ -248,7 +258,7 @@ describe.skipIf(!anvilAvailable())("e2e daemon (node src/cli.ts run)", () => {
     expect(sample(metrics, "sahara_monitor_open_conditions", {severity: "info"})).toBe(0);
     const route = {sink: "telegram", target: CHAT_ID};
     expect(sample(metrics, "sahara_monitor_alert_deliveries_total", {...route, result: "ok"})).toBe(
-      1 + KNOWN_MOCK_CONDITIONS.length,
+      2 + KNOWN_MOCK_CONDITIONS.length,
     );
     expect(sample(metrics, "sahara_monitor_alert_deliveries_total", {...route, result: "failed"})).toBe(0);
     expect(sample(metrics, "sahara_monitor_alert_delivery_retries_total", route)).toBe(0);
@@ -368,9 +378,16 @@ describe.skipIf(!anvilAvailable())("e2e daemon (node src/cli.ts run)", () => {
     expect(firstLine(known.text)).toBe(
       `${HEADER.high} · ${CHAIN} · <b>Timelock operation executed: LiquidityManager.setMaxFundingPerCall</b>`,
     );
-    // The muted backfill recorded its scheduling (no "not seen" note) without ever sending the scheduled alert.
+    // The muted backfill recorded its scheduling (no "not seen" note); its only scheduled alert is the one sent after
+    // the startup message.
     expect(known.text).not.toContain("Scheduling not seen by the monitor");
-    expect(mock().messages.some((m) => ruleOf(m) === "timelock.scheduled" && m.text.includes(preStart.id))).toBe(false);
+    const preStartScheduled = mock().messages.filter(
+      (m) => ruleOf(m) === "timelock.scheduled" && m.text.includes(preStart.id),
+    );
+    expect(preStartScheduled.map((m) => firstLine(m.text))).toEqual([
+      `${HEADER.high} · ${CHAIN} · <b>Timelock operation pending since before the monitor started: ` +
+        "LiquidityManager.setMaxFundingPerCall</b>",
+    ]);
 
     // Protected Guardian recovery: critical, and the Guardian cannot cancel it.
     recovery = await d.scheduleSetGuardian(accounts.replacementGuardian.address);

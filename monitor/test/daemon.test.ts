@@ -484,8 +484,13 @@ describe("first start", () => {
       cursor: 100n,
       backfill: {from: 75n, to: 100n, next: 101n, done: true},
     });
-    // Only the startup message went out; nothing from the backfill.
-    expect(sink.summary).toEqual([`firing:info:global:health:started:${T0}`]);
+    // Nothing from the backfill itself; right after the startup message, each Timelock operation still pending (never
+    // alerted, the backfill being muted), in scheduling order.
+    expect(sink.summary).toEqual([
+      `firing:info:global:health:started:${T0}`,
+      `firing:high:ethereum:timelock:pending-at-start:0x01:${zeroHash}`,
+      `firing:high:ethereum:timelock:pending-at-start:0x02:${zeroHash}`,
+    ]);
     const fields = sink.messages[0]!.alert.fields!;
     expect(fields.find((field) => field.label === "ethereum")?.value).toBe(
       [
@@ -572,6 +577,22 @@ describe("first start", () => {
         "Pending Timelock operations known: 0",
         "Historical event alerts suppressed: 0",
       ].join("\n"),
+    );
+  });
+
+  it("does not alert pending operations again on a restart after the backfill completed", async () => {
+    const store = createStore();
+    store.set(daemonNamespace("ethereum"), {cursor: 100n, backfill: {from: 75n, to: 100n, next: 101n, done: true}});
+    store.set(timelockNamespace("ethereum"), {ops: {"0x01": opPending("0x01")}});
+    const {daemon, sink} = testDaemon({
+      config: daemonConfig({chains: {ethereum: {startBlock: 75}}}),
+      store,
+      heads: {ethereum: 100n},
+    });
+    await daemon.cycle("ethereum");
+    expect(sink.summary).toEqual([`firing:info:global:health:started:${T0}`]);
+    expect(sink.messages[0]!.alert.fields!.find((field) => field.label === "ethereum")!.value).toContain(
+      "Pending Timelock operations known: 1",
     );
   });
 
