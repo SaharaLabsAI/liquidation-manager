@@ -13,6 +13,7 @@ import {
   hashOperation,
   hashOperationBatch,
   OPERATION_STATE,
+  pendingAtStartAlerts,
   readPendingOps,
   scheduledAsBatch,
   timelockEventsRule,
@@ -1060,5 +1061,42 @@ describe("timelockQueueRule", () => {
     state = OPERATION_STATE.Done;
     expect((await timelockQueueRule.check(ctx, BLOCK + 30000n)).conditions).toEqual([]);
     expect(readPendingOps(ctx.store, "ethereum")[id]?.status).toBe("executed");
+  });
+});
+
+describe("pendingAtStartAlerts", () => {
+  it("alerts each operation still pending after the backfill, in scheduling order, with its scheduling", async () => {
+    const later = single(setGuardian(), {tx: 2, block: BLOCK + 2n});
+    const earlier = single(thresholds, {tx: 1, block: BLOCK});
+    const dropped = single(acceptPool, {tx: 3, block: BLOCK + 1n});
+    const ctx = await run([...earlier.logs, ...dropped.logs, cancelled(dropped.id), ...later.logs]);
+    const ops = readPendingOps(ctx.store, "ethereum");
+    const reference = ops[earlier.id]!.scheduledAt + 60;
+
+    const alerts = pendingAtStartAlerts(ctx, reference);
+    expect(alerts.map((alert) => [alert.key, alert.severity, alert.rule])).toEqual([
+      [`ethereum:timelock:pending-at-start:${earlier.id}:${txHash(1)}`, "high", "timelock.scheduled"],
+      [`ethereum:timelock:pending-at-start:${later.id}:${txHash(2)}`, "critical", "timelock.scheduled"],
+    ]);
+    const [first, second] = alerts;
+    expect(first!.title).toBe(
+      "Timelock operation pending since before the monitor started: LiquidityManager.setPoolThresholds",
+    );
+    expect(field(first, "Operation id")).toBe(earlier.id);
+    expect(field(first, "Scheduled at")).toBe(`${formatTimestamp(ops[earlier.id]!.scheduledAt)} (block ${BLOCK})`);
+    expect(field(first, "Executable at")).toContain("delay 3d");
+    expect(field(first, "Operation")).toBe(ops[earlier.id]!.summary);
+    expect(field(first, "Predecessor")).toBe("none");
+    expect(field(first, "Cancel tx: to")).toBe(`GuardianController ${TL.controller}`);
+    expect(first!.links?.[0]?.url).toBe(`https://etherscan.io/tx/${txHash(1)}`);
+    expect(first!.note).toMatch(/^Scheduled .*, before this monitor's first start, so it was not alerted/);
+    expect(second!.title).toBe(
+      "Guardian recovery pending on Timelock since before the monitor started (protected setGuardian)",
+    );
+    expect(field(second, "Guardian action")).toMatch(/Guardian cannot cancel/);
+  });
+
+  it("is empty without pending operations", () => {
+    expect(pendingAtStartAlerts(tlContext())).toEqual([]);
   });
 });

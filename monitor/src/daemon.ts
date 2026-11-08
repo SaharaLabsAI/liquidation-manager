@@ -64,7 +64,7 @@ import {redact, registerSecret, type Logger} from "./log.ts";
 import {backfillRules, eventRules, stateRules} from "./rules/index.ts";
 import {reconcile, RECONCILE_SCOPE, type ReconcileReport} from "./rules/reconcile.ts";
 import {readFailedKey} from "./rules/state-common.ts";
-import {readPendingOps} from "./rules/timelock.ts";
+import {pendingAtStartAlerts, readPendingOps} from "./rules/timelock.ts";
 import {createStore, type Store} from "./store.ts";
 import type {
   Alert,
@@ -351,6 +351,8 @@ interface ChainRuntime {
   startup?: StartupInfo;
   /** Event alerts the muted backfill dropped on this start. */
   suppressed: number;
+  /** Timelock operations the backfill found still pending, alerted right after the startup message. */
+  pendingAtStart?: Alert[];
   inFlight?: Promise<boolean>;
   loop: Loop;
 }
@@ -1108,6 +1110,7 @@ export class Daemon {
     delete runtime.health.backfill;
     state.cursor = current.to;
     this.#persistChain(runtime);
+    runtime.pendingAtStart = pendingAtStartAlerts(runtime.ctx);
     runtime.startup = this.#startupInfo(runtime, {
       cursor: current.to,
       mode: "backfill",
@@ -1150,6 +1153,10 @@ export class Daemon {
     });
     const options = {dryRun: this.#dryRun, dropped: this.#dropped, reconcile: this.#blockedAtStart};
     this.alerter.emit(startupAlert(this.#bootAt, infos, options));
+    for (const runtime of this.#chains) {
+      for (const alert of runtime.pendingAtStart ?? []) this.alerter.emit(alert);
+      delete runtime.pendingAtStart;
+    }
   }
 
   /**

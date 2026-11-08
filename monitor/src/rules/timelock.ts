@@ -667,6 +667,55 @@ function predecessorNote(recovery: boolean): string {
     : note;
 }
 
+/**
+ * One alert per operation still pending after the first-start backfill, in scheduling order. The backfill is muted, so
+ * none of them was alerted when it was scheduled. Same rule and severity as its `timelock.scheduled` alert, with when
+ * it was scheduled; the queue rule raises its "executable within 24h" and "executable now" conditions as for any op.
+ */
+export function pendingAtStartAlerts(ctx: ChainContext, reference = nowSec()): Alert[] {
+  const pending = Object.values(readPendingOps(ctx.store, ctx.name)).filter((op) => op.status === "pending");
+  pending.sort(
+    (a, b) =>
+      (a.scheduledBlock === b.scheduledBlock ? 0 : a.scheduledBlock < b.scheduledBlock ? -1 : 1) ||
+      a.scheduledAt - b.scheduledAt ||
+      a.txHash.localeCompare(b.txHash) ||
+      a.id.localeCompare(b.id),
+  );
+  return pending.map((op) => {
+    const guardian = guardianFields(ctx, op, reference);
+    const fields: AlertField[] = [
+      {label: "Operation id", value: op.id, code: true},
+      {label: "Scheduled at", value: `${formatTimestamp(op.scheduledAt)} (block ${op.scheduledBlock})`},
+      {label: "Executable at", value: `${etaText(op.readyAt, reference)}; delay ${formatDuration(op.delay)}`},
+      {label: "Operation", value: op.summary},
+      {
+        label: "Predecessor",
+        value: BigInt(op.predecessor) === 0n ? "none" : op.predecessor,
+        code: BigInt(op.predecessor) !== 0n,
+      },
+      ...guardian.fields,
+    ];
+    const links: AlertLink[] = [txLink(ctx, op.txHash)];
+    if (ctx.addresses.timelock) links.push(addressLink(ctx, ctx.addresses.timelock));
+    const name = shortTitleFromSummary(op.summary);
+    return {
+      key: `${ctx.name}:${RULE}:pending-at-start:${op.id}:${op.txHash}`,
+      kind: "event",
+      severity: op.severity,
+      rule: "timelock.scheduled",
+      chain: ctx.name,
+      title: op.protected
+        ? "Guardian recovery pending on Timelock since before the monitor started (protected setGuardian)"
+        : `Timelock operation pending since before the monitor started: ${name}`,
+      fields,
+      links,
+      note:
+        `Scheduled ${formatTimestamp(op.scheduledAt)}, before this monitor's first start, so it was not alerted ` +
+        `when scheduled (the first-start backfill is muted). ${guardian.note}`,
+    };
+  });
+}
+
 function shortTitleFromSummary(summary: string): string {
   const head = summary.split("(")[0] ?? summary;
   return head.length > 100 ? `${head.slice(0, 97)}...` : head;
