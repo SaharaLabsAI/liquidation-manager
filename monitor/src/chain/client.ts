@@ -23,6 +23,8 @@ export interface ChainClientOptions {
   name?: string;
   /** Per-request HTTP timeout. eth_getLogs over a full `maxLogRange` can be slow on public RPCs. */
   timeoutMs?: number;
+  /** HTTP timeout of eth_getBlockReceipts (see `routeReceipts`). */
+  receiptsTimeoutMs?: number;
   /** Retries per RPC URL before falling back to the next one. */
   retryCount?: number;
 }
@@ -32,7 +34,7 @@ export interface ChainClientOptions {
  * of one cycle share HTTP requests.
  */
 export function createChainClient(chain: ChainConfig, options: ChainClientOptions = {}): PublicClient {
-  const {name = `chain-${chain.chainId}`, timeoutMs = 20_000, retryCount = 2} = options;
+  const {name = `chain-${chain.chainId}`, timeoutMs = 20_000, receiptsTimeoutMs = 120_000, retryCount = 2} = options;
   const viemChain: Chain = {
     id: chain.chainId,
     name,
@@ -45,7 +47,34 @@ export function createChainClient(chain: ChainConfig, options: ChainClientOption
     // Small batches: several providers reject or throttle large JSON-RPC batches of eth_getLogs.
     http(url, {timeout: timeoutMs, retryCount, batch: {batchSize: 10}}),
   );
-  return createPublicClient({chain: viemChain, transport: stickyFallback(transports)}) as PublicClient;
+  const receiptTransports = chain.rpcUrls.map((url) => http(url, {timeout: receiptsTimeoutMs, retryCount}));
+  const transport = routeReceipts(stickyFallback(transports), stickyFallback(receiptTransports));
+  return createPublicClient({chain: viemChain, transport}) as PublicClient;
+}
+
+/**
+ * Sends eth_getBlockReceipts through `receipts`, everything else through `main`. The scanner reads a block from its
+ * receipts when the block's logs exceed the provider's result cap. Those receipts can be megabytes (a block flooded
+ * with 15,000 dust transfers: about 10 MB), far slower than a log query, so they get their own timeout and no batching.
+ */
+export function routeReceipts(main: Transport, receipts: Transport): Transport {
+  return (config) => {
+    const viaMain = main(config);
+    const viaReceipts = receipts(config);
+    const request = (args: {method: string; params?: unknown}, options?: unknown) =>
+      (args.method === "eth_getBlockReceipts" ? viaReceipts : viaMain).request(args as never, options as never);
+    return createTransport(
+      {
+        key: viaMain.config.key,
+        name: viaMain.config.name,
+        type: viaMain.config.type,
+        request: request as EIP1193RequestFn,
+        // Both sides retry on their own.
+        retryCount: 0,
+      },
+      viaMain.value,
+    );
+  };
 }
 
 /**

@@ -141,7 +141,12 @@ export interface CliDeps {
 }
 
 function defaultClient(name: string, chain: ChainConfig): PublicClient {
-  return createChainClient(chain, {name, timeoutMs: chain.rpcTimeoutMs, retryCount: chain.rpcRetryCount});
+  return createChainClient(chain, {
+    name,
+    timeoutMs: chain.rpcTimeoutMs,
+    receiptsTimeoutMs: chain.rpcReceiptsTimeoutMs,
+    retryCount: chain.rpcRetryCount,
+  });
 }
 
 /** Runs a command and returns its exit code. */

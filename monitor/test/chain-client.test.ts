@@ -1,3 +1,6 @@
+import {createServer} from "node:http";
+import type {AddressInfo} from "node:net";
+
 import {createPublicClient, custom, type PublicClient} from "viem";
 import {describe, expect, it, vi} from "vitest";
 
@@ -6,6 +9,7 @@ import {
   createChainClient,
   createChainContext,
   createExplorer,
+  routeReceipts,
   stickyFallback,
 } from "../src/chain/client.ts";
 import {silentLogger} from "../src/log.ts";
@@ -58,6 +62,60 @@ describe("createChainClient", () => {
     expect(client.chain?.name).toBe("bsc");
     expect(client.transport.type).toBe("fallback");
     expect((client.transport as unknown as {transports: unknown[]}).transports).toHaveLength(2);
+  });
+});
+
+describe("routeReceipts", () => {
+  it("sends eth_getBlockReceipts through its own transport and everything else through the main one", async () => {
+    const calls: string[] = [];
+    const node = (name: string) =>
+      custom({
+        async request({method}: {method: string}) {
+          calls.push(`${name} ${method}`);
+          return method === "eth_getBlockReceipts" ? [] : "0x64";
+        },
+      });
+    const client = createPublicClient({transport: routeReceipts(node("main"), node("receipts"))});
+    expect(await client.getBlockNumber({cacheTime: 0})).toBe(100n);
+    expect(await client.request({method: "eth_getBlockReceipts", params: ["0x5"]})).toEqual([]);
+    expect(calls).toEqual(["main eth_blockNumber", "receipts eth_getBlockReceipts"]);
+  });
+});
+
+describe("createChainClient: eth_getBlockReceipts timeout", () => {
+  it("waits rpcReceiptsTimeoutMs for receipts while other requests keep rpcTimeoutMs", async () => {
+    // Every answer takes 300 ms: past the 100 ms request timeout, within the 2 s receipts timeout.
+    const methods: string[] = [];
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+      req.on("end", () => {
+        const parsed = JSON.parse(body) as {id: number; method: string} | Array<{id: number; method: string}>;
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        methods.push(...items.map((item) => item.method));
+        const answers = items.map((item) => ({
+          jsonrpc: "2.0",
+          id: item.id,
+          result: item.method === "eth_getBlockReceipts" ? [] : "0x64",
+        }));
+        setTimeout(() => res.end(JSON.stringify(Array.isArray(parsed) ? answers : answers[0])), 300);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const {port} = server.address() as AddressInfo;
+      const chain = {
+        ...chainConfig({contracts: {token: addr(1), registry: addr(2)}}),
+        rpcUrls: [`http://127.0.0.1:${port}`],
+      };
+      const client = createChainClient(chain, {timeoutMs: 100, receiptsTimeoutMs: 2_000, retryCount: 0});
+      await expect(client.getBlockNumber({cacheTime: 0})).rejects.toThrow(/took too long/);
+      expect(await client.request({method: "eth_getBlockReceipts", params: ["0x5"]})).toEqual([]);
+      expect(methods).toEqual(["eth_blockNumber", "eth_getBlockReceipts"]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });
 

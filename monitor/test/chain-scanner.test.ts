@@ -1,8 +1,15 @@
-import type {PublicClient} from "viem";
+import type {PublicClient, RpcLog} from "viem";
 import {describe, expect, it} from "vitest";
 
-import {chunkRange, fetchLogs, MAX_CONCURRENT_REQUESTS} from "../src/chain/scanner.ts";
-import {silentLogger} from "../src/log.ts";
+import {
+  chunkRange,
+  fetchLogs,
+  matchesFilter,
+  MAX_CONCURRENT_REQUESTS,
+  MIN_RESULT_CAP,
+  toLog,
+} from "../src/chain/scanner.ts";
+import {silentLogger, type Logger} from "../src/log.ts";
 import {addr, createLogNode, rpcLog, topic} from "./helpers/chain-fakes.ts";
 
 const POOL = addr(0xa1);
@@ -62,11 +69,11 @@ describe("fetchLogs", () => {
     for (let i = 1; i < covered.length; i++) expect(covered[i]![0]).toBe(covered[i - 1]![1]! + 1n);
   });
 
-  it("rethrows a single-block failure naming the block and the filter", async () => {
-    const node = createLogNode([rpcLog({address: POOL, block: 3n, logIndex: 0})], {failBlocks: [5n]});
+  it("rethrows a single-block failure naming the block and the filter when its receipts fail too", async () => {
+    const node = createLogNode([rpcLog({address: POOL, block: 3n, logIndex: 0})], {failBlocks: [5n], receipts: false});
     const promise = fetchLogs(node.client, [{address: POOL, topics: [topic(7)]}], {from: 0n, to: 15n}, opts(100));
     await expect(promise).rejects.toThrow(
-      /eth_getLogs failed at block 5 for address 0x0+[aA]1, topics \["0x0+7"\]: upstream timeout/,
+      /eth_getLogs failed at block 5 for address 0x0+[aA]1, topics \["0x0+7"\]: upstream timeout; eth_getBlockReceipts failed too/,
     );
     expect(node.calls.some((call) => call.from === 5n && call.to === 5n)).toBe(true);
   });
@@ -166,5 +173,200 @@ describe("fetchLogs", () => {
       opts(100),
     );
     expect(node.calls.map((call) => call.address)).toEqual([POOL]);
+  });
+});
+
+describe("fetchLogs: a single block over the provider's result cap", () => {
+  // Block 5: one transaction moving dust 40 times (Transfer topic 1, to POOL as topic 3), plus unrelated logs.
+  const flood = Array.from({length: 40}, (_, i) =>
+    rpcLog({address: TOKEN, block: 5n, logIndex: i, topics: [topic(1), topic(0xee), topic(0xa1)]}),
+  );
+  const logs = [
+    rpcLog({address: POOL, block: 3n, logIndex: 0}),
+    ...flood,
+    rpcLog({address: TOKEN, block: 5n, logIndex: 40, txIndex: 1, topics: [topic(1), topic(0xee), topic(0xbb)]}),
+    rpcLog({address: POOL, block: 5n, logIndex: 41, txIndex: 2, topics: [topic(2)]}),
+    rpcLog({address: TOKEN, block: 7n, logIndex: 0, topics: [topic(1), topic(0xee), topic(0xa1)]}),
+  ];
+  const filters = [
+    {address: TOKEN, topics: [topic(1), null, [topic(0xa1), topic(0xa3)]]},
+    {address: [POOL, TOKEN], topics: [[topic(1), topic(2)]]},
+  ];
+  const key = (log: {blockNumber: bigint | null; logIndex: number | null}) => `${log.blockNumber}:${log.logIndex}`;
+
+  it("reads it from its receipts, once for every filter, exactly as eth_getLogs would return it", async () => {
+    const capped = createLogNode(logs, {maxResults: 10});
+    const warnings: Array<Record<string, unknown>> = [];
+    const log = {
+      ...silentLogger,
+      warn: (_msg: string, fields?: Record<string, unknown>) => warnings.push(fields ?? {}),
+    };
+    const result = await fetchLogs(capped.client, filters, {from: 0n, to: 9n}, {...opts(100), log: log as Logger, minResultCap: 20});
+    const expected = await fetchLogs(createLogNode(logs).client, filters, {from: 0n, to: 9n}, opts(100));
+    expect(result.map(key)).toEqual(expected.map(key));
+    expect(result).toHaveLength(44);
+    expect(capped.receiptCalls).toEqual([5n]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({block: 5n, error: "query returned more than 10 results"});
+  });
+
+  it("fails naming the block and both errors when the receipts cannot be read either", async () => {
+    const node = createLogNode(logs, {maxResults: 10, receipts: false});
+    await expect(fetchLogs(node.client, filters.slice(0, 1), {from: 0n, to: 9n}, opts(100))).rejects.toThrow(
+      /eth_getLogs failed at block 5 for address .*: query returned more than 10 results; eth_getBlockReceipts failed too: the method eth_getBlockReceipts does not exist/,
+    );
+  });
+
+  it("does not use receipts holding fewer matching logs than any result cap: an outage, not a cap", async () => {
+    // eth_getLogs fails everywhere (rate limit, outage, method disabled); receipts work.
+    const node = createLogNode(logs, {failBlocks: [...Array(10).keys()].map(BigInt)});
+    await expect(fetchLogs(node.client, filters, {from: 0n, to: 9n}, opts(100))).rejects.toThrow(
+      /eth_getLogs failed at block \d+ for .*: upstream timeout \(its receipts hold \d+ matching logs, too few for a result cap\)/,
+    );
+    // Gives up at the first single blocks, as without the fallback: a receipts request per filter reaching one before
+    // the scan is aborted (at most the requests in flight), and a few dozen log queries.
+    expect(node.receiptCalls.length).toBeLessThanOrEqual(MAX_CONCURRENT_REQUESTS);
+    expect(node.calls.length).toBeLessThan(30);
+  });
+
+  it("uses receipts from MIN_RESULT_CAP matching logs on", async () => {
+    const big = Array.from({length: MIN_RESULT_CAP}, (_, i) =>
+      rpcLog({address: TOKEN, block: 8n, logIndex: i, topics: [topic(1), topic(0xee), topic(0xa1)]}),
+    );
+    const node = createLogNode(big, {maxResults: 10_000 - 1, failBlocks: [8n]});
+    const result = await fetchLogs(node.client, filters.slice(0, 1), {from: 8n, to: 8n}, opts(100));
+    expect(result).toHaveLength(MIN_RESULT_CAP);
+    const short = createLogNode(big.slice(1), {failBlocks: [8n]});
+    await expect(fetchLogs(short.client, filters.slice(0, 1), {from: 8n, to: 8n}, opts(100))).rejects.toThrow(
+      /hold 999 matching logs, too few/,
+    );
+  });
+
+  it("rejects receipts of another block", async () => {
+    const node = createLogNode(logs, {
+      maxResults: 10,
+      receipts: (_block, receipts) => [...receipts, {blockNumber: "0x6", logs: []}],
+    });
+    await expect(fetchLogs(node.client, filters.slice(0, 1), {from: 5n, to: 5n}, opts(100))).rejects.toThrow(
+      /eth_getBlockReceipts failed too: a receipt of block 0x6 was returned for block 5/,
+    );
+  });
+
+  it("does not fall back once stopped", async () => {
+    const node = createLogNode(logs, {maxResults: 10});
+    const stopped = {...opts(100), stopped: () => true};
+    const promise = fetchLogs(node.client, filters.slice(0, 1), {from: 5n, to: 5n}, stopped);
+    await expect(promise).rejects.toThrow(/stopped/);
+    expect(node.receiptCalls).toEqual([]);
+  });
+});
+
+describe("matchesFilter", () => {
+  const log = rpcLog({address: POOL, block: 1n, logIndex: 0, topics: [topic(1), topic(2)]});
+
+  it("matches eth_getLogs semantics: any address, null or an OR-array per topic position", () => {
+    expect(matchesFilter(log, {address: POOL.toLowerCase() as typeof POOL})).toBe(true);
+    expect(matchesFilter(log, {address: [TOKEN, POOL], topics: [topic(1)]})).toBe(true);
+    expect(matchesFilter(log, {address: POOL, topics: [null, [topic(3), topic(2)]]})).toBe(true);
+    expect(matchesFilter(log, {address: TOKEN})).toBe(false);
+    expect(matchesFilter(log, {address: POOL, topics: [topic(2)]})).toBe(false);
+    expect(matchesFilter(log, {address: POOL, topics: [null, [topic(3)]]})).toBe(false);
+  });
+
+  it("matches a null position beyond the log's topics (providers disagree), never a value there", () => {
+    expect(matchesFilter(log, {address: POOL, topics: [topic(1), topic(2), null]})).toBe(true);
+    expect(matchesFilter(log, {address: POOL, topics: [topic(1), null, null, null]})).toBe(true);
+    expect(matchesFilter(log, {address: POOL, topics: [topic(1), topic(2), topic(3)]})).toBe(false);
+    expect(matchesFilter(log, {address: POOL, topics: [null, null, [topic(3)]]})).toBe(false);
+  });
+});
+
+describe("fetchLogs: randomized provider failures", () => {
+  // Deterministic PRNG, so a failing case can be replayed from its seed.
+  const prng = (seed: number) => () => (seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31) / 2 ** 31;
+  const ADDRESSES = [addr(0xc1), addr(0xc2), addr(0xc3), addr(0xc4)];
+  const TOPICS = [1, 2, 3, 4, 5].map(topic);
+  const keyOf = (log: {blockNumber: bigint | null; logIndex: number | null}) => `${log.blockNumber}:${log.logIndex}`;
+
+  it("returns exactly the matching logs, or fails only when a block can be read neither way", async () => {
+    let resolved = 0;
+    let rejected = 0;
+    let fallbacks = 0;
+    for (let seed = 1; seed <= 300; seed++) {
+      const rnd = prng(seed);
+      const int = (n: number) => Math.floor(rnd() * n);
+      const pick = <T>(xs: readonly T[]): T => xs[int(xs.length)]!;
+      const blocks = 2 + int(40);
+      const logs: RpcLog[] = [];
+      for (let block = 0; block < blocks; block++) {
+        const count = rnd() < 0.15 ? 40 + int(40) : int(12);
+        for (let i = 0; i < count; i++) {
+          const topics = Array.from({length: int(5)}, () => pick(TOPICS));
+          logs.push(rpcLog({address: pick(ADDRESSES), block: BigInt(block), logIndex: i, txIndex: int(3), topics}));
+        }
+      }
+      const filters = Array.from({length: 1 + int(4)}, () => ({
+        address: rnd() < 0.5 ? pick(ADDRESSES) : [pick(ADDRESSES), pick(ADDRESSES)],
+        topics: Array.from({length: int(4)}, () => (rnd() < 0.4 ? null : rnd() < 0.5 ? pick(TOPICS) : [pick(TOPICS)])),
+      }));
+      const maxResults = rnd() < 0.7 ? 5 + int(30) : undefined;
+      const failBlocks = Array.from({length: int(3)}, () => BigInt(int(blocks)));
+      const noReceipts = new Set(Array.from({length: int(3)}, () => BigInt(int(blocks))));
+      const node = createLogNode(logs, {
+        maxResults,
+        maxBlocks: rnd() < 0.5 ? 1 + int(20) : undefined,
+        failBlocks,
+        receipts: (block, receipts) => {
+          if (noReceipts.has(block)) throw new Error(`receipts unavailable at ${block}`);
+          return receipts;
+        },
+      });
+      const range = {from: 0n, to: BigInt(blocks - 1)};
+      const minResultCap = rnd() < 0.5 ? 0 : 1 + int(40);
+      const matching = (block: bigint, filter: (typeof filters)[number]) =>
+        logs.filter((log) => BigInt(log.blockNumber!) === block && matchesFilter(log, filter));
+      // A block eth_getLogs cannot serve for some filter even alone, whose receipts are unavailable or hold too few
+      // matching logs for a result cap.
+      const unreadable = [...Array(blocks).keys()].map(BigInt).filter((block) =>
+        filters.some((filter) => {
+          const count = matching(block, filter).length;
+          const failsAlone = failBlocks.includes(block) || (maxResults !== undefined && count > maxResults);
+          return failsAlone && (noReceipts.has(block) || count < minResultCap);
+        }),
+      );
+      try {
+        const result = await fetchLogs(node.client, filters, range, {...opts(1 + int(30)), minResultCap});
+        const expected = [...new Map(
+          logs.filter((log) => filters.some((filter) => matchesFilter(log, filter))).map((log) => [keyOf(toLog(log)), log]),
+        ).keys()].sort((a, b) => {
+          const [ba, ia] = a.split(":").map(Number);
+          const [bb, ib] = b.split(":").map(Number);
+          return ba! - bb! || ia! - ib!;
+        });
+        expect(result.map(keyOf), `seed ${seed}`).toEqual(expected);
+        expect(unreadable, `seed ${seed}: resolved although a block was unreadable`).toEqual([]);
+        resolved++;
+      } catch (error) {
+        if (!(error instanceof Error) || !/eth_getBlockReceipts failed too|too few for a result cap/.test(error.message)) {
+          throw error;
+        }
+        expect(unreadable.length, `seed ${seed}: failed although every block was readable`).toBeGreaterThan(0);
+        rejected++;
+      }
+      // Receipts are read only for blocks eth_getLogs failed on alone, each at most once.
+      expect(new Set(node.receiptCalls).size, `seed ${seed}`).toBe(node.receiptCalls.length);
+      for (const block of node.receiptCalls) {
+        expect(
+          node.calls.some((call) => call.from === block && call.to === block && !call.ok),
+          `seed ${seed}: receipts of ${block} without a failed single-block query`,
+        ).toBe(true);
+      }
+      expect(node.stats.maxInFlight).toBeLessThanOrEqual(MAX_CONCURRENT_REQUESTS);
+      fallbacks += node.receiptCalls.length;
+    }
+    // The cases exercise both outcomes and the fallback.
+    expect(resolved).toBeGreaterThan(100);
+    expect(rejected).toBeGreaterThan(10);
+    expect(fallbacks).toBeGreaterThan(100);
   });
 });
