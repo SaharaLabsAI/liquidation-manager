@@ -169,9 +169,13 @@ Recall stops (`Unauthorized`), fund stops (`PoolNotActiveInRegistry`), the Route
 
 Deploy a new Manager, GuardianController and adapter (same Timelock), then one batch in this order:
 `TL.grantRole(CANCELLER_ROLE, newController)`, `pool.setRateLimitAdmin(newController)`, `pool.setRebalancer(newAdapter)`,
-the new Manager's `setPoolSpec` (with `rateLimitAdmin = newController`), thresholds, budgets, limits and operators,
-`newManager.registerAdapter(newAdapter, pool)`, `oldManager.migrateReserves(newManager, max)`,
+the new Manager's `setPoolSpec` (with `rateLimitAdmin = newController`), `setPoolThresholds`,
+`setPoolFundingBudget`, `setAggregateFundingBudget`, `setMaxFundingPerCall`, `setRecallLimits`, `setFundingOperator`,
+`setRecallOperator`, `newManager.registerAdapter(newAdapter, pool)`, `oldManager.migrateReserves(newManager, max)`,
 `oldManager.setGuardian(address(0))`, `TL.revokeRole(CANCELLER_ROLE, oldController)`.
+
+- Include `setMaxFundingPerCall`: it starts at 0 on a new Manager, so without it every `fund` reverts
+  `ExceedsPerCallLimit` until another Timelock operation sets it. `setRecallLimits` does not set it.
 
 - Revoke the old controller: each controller protects only its own Manager's `setGuardian`, so a second canceller
   could cancel a recovery on the new Manager.
