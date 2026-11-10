@@ -133,7 +133,8 @@ Sepolia**, 91 transactions on each chain. The testnet stacks are left operationa
 - The README's schedule-first handover order (batch scheduled before the legacy calls, a premature `executeBatch`
   reverting `MustBeProposedOwner` while the operation stays Ready). The live run used the order `Handover.s.sol`
   prints: legacy calls first, then the batch. The completeness review rated the schedule-first rehearsal high
-  priority; it was not changed mid-run.
+  priority; it was not changed mid-run. Since rehearsed on Ethereum and BSC mainnet forks with the real legacy
+  multisig by [`script/mainnet-fork/`](../mainnet-fork/README.md) (2026-11-09).
 - A hostile Guardian as one timeline (it pauses, locks down and cancels a restore; Governance replaces it, then
   restores in a second delay). 05 and 06 cover the parts separately.
 - EMERGENCY.md R9 (abandon the Manager, including revoking the old controller's `CANCELLER_ROLE`) and the R1

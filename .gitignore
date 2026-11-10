@@ -15,3 +15,5 @@ script/testnet/deployments/*.pid
 script/testnet/deployments/rpc-fault-rules.json
 broadcast/*/11155111/
 broadcast/*/97/
+# Mainnet activation rehearsal: fork-only state, logs and forge broadcast records.
+script/mainnet-fork/deployments/
