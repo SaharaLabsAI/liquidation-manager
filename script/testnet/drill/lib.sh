@@ -15,32 +15,36 @@ set -euo pipefail
 DRILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TESTNET_DIR="$(dirname "$DRILL_DIR")"
 ROOT_DIR="$(cd "$TESTNET_DIR/../.." && pwd)"
+# Another drill (script/mainnet-fork) reuses these helpers with its own accounts/params/chains and state directory.
+CONFIG_DIR=${DRILL_CONFIG_DIR:-$DRILL_DIR}
+DEPLOYMENTS_DIR=${DRILL_DEPLOYMENTS_DIR:-$TESTNET_DIR/deployments}
+SALT_PREFIX=${DRILL_SALT_PREFIX:-lm-testnet-drill}
 
 : "${CHAIN:?set CHAIN=sepolia or CHAIN=bsc}"
 # cast and forge read CHAIN as their --chain option: keep it a shell variable only.
 export -n CHAIN
 # shellcheck source=/dev/null
-source "$DRILL_DIR/accounts.env"
+source "$CONFIG_DIR/accounts.env"
 # shellcheck source=/dev/null
-source "$DRILL_DIR/params.env"
+source "$CONFIG_DIR/params.env"
 # shellcheck source=/dev/null
-source "$DRILL_DIR/chains/$CHAIN.env"
+source "$CONFIG_DIR/chains/$CHAIN.env"
 
 if [ -n "${FORK_RPC:-}" ]; then
   MODE=fork
   RPC=$FORK_RPC
-  DEPLOYMENT_FILE="$TESTNET_DIR/deployments/$CHAIN.fork.env"
-  TXLOG="$TESTNET_DIR/deployments/$CHAIN.fork.txlog"
+  DEPLOYMENT_FILE="$DEPLOYMENTS_DIR/$CHAIN.fork.env"
+  TXLOG="$DEPLOYMENTS_DIR/$CHAIN.fork.txlog"
   # The fork keeps the testnet chain id; keep its forge broadcast records away from the live ones.
-  export FOUNDRY_BROADCAST="$TESTNET_DIR/deployments/fork-broadcast"
+  export FOUNDRY_BROADCAST="$DEPLOYMENTS_DIR/fork-broadcast"
   BROADCAST_DIR=$FOUNDRY_BROADCAST
 else
   MODE=live
-  DEPLOYMENT_FILE="$TESTNET_DIR/deployments/$CHAIN.env"
-  TXLOG="$TESTNET_DIR/deployments/$CHAIN.txlog"
+  DEPLOYMENT_FILE="$DEPLOYMENTS_DIR/$CHAIN.env"
+  TXLOG="$DEPLOYMENTS_DIR/$CHAIN.txlog"
   BROADCAST_DIR="$ROOT_DIR/broadcast"
 fi
-mkdir -p "$TESTNET_DIR/deployments"
+mkdir -p "$DEPLOYMENTS_DIR"
 touch "$DEPLOYMENT_FILE" "$TXLOG"
 # shellcheck source=/dev/null
 source "$DEPLOYMENT_FILE"
@@ -357,7 +361,7 @@ _batch_args() {
   BD="[${BATCH_D[*]}]"
 }
 
-new_salt() { OP_SALT=$(cast keccak "lm-testnet-drill:$CHAIN:$MODE:$1:$(date +%s)"); }
+new_salt() { OP_SALT=$(cast keccak "$SALT_PREFIX:$CHAIN:$MODE:$1:$(date +%s)"); }
 
 # tl_wait <id>: blocks until the operation is Ready. One state read per poll; transient RPC errors are retried;
 # Unset (cancelled / unknown) and Done abort.
@@ -559,7 +563,7 @@ rate_limits() { # prints outbound and inbound bucket state for the remote chain
 require_no_inflight() {
   [ "$MODE" = live ] || return 0
   local remote
-  remote=$(bash -c "source '$TESTNET_DIR/deployments/$REMOTE_CHAIN.env' 2>/dev/null; echo \${BRIDGE_DELIVERED:-}")
+  remote=$(bash -c "source '$DEPLOYMENTS_DIR/$REMOTE_CHAIN.env' 2>/dev/null; echo \${BRIDGE_DELIVERED:-}")
   [ "${BRIDGE_DELIVERED:-}" = 1 ] && [ "$remote" = 1 ] ||
     die "CCIP test transfers not confirmed delivered in both directions (run 04-bridge.sh wait on both chains)"
 }

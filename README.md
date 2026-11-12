@@ -167,6 +167,9 @@ document and are passed to `Handover` through the environment.
 
 Incident procedures, every lever and every way to get reserves out of the Manager, the adapter and the pool are in
 [`EMERGENCY.md`](EMERGENCY.md), rehearsed end to end on Sepolia ⇄ BSC testnet by [`script/testnet/`](script/testnet/README.md).
+The mainnet activation procedure (deploy and handover under a 24 h delay, a 1M small batch, every reserve into the
+Manager, then the delay raised to 72 h) is in [`ACTIVATION.md`](ACTIVATION.md), rehearsed on Ethereum and BSC mainnet
+forks by [`script/mainnet-fork/`](script/mainnet-fork/README.md).
 
 - Schedule a Guardian recovery as exactly `abi.encodeCall(LiquidityManager.setGuardian, (newGuardian))`, value 0,
   **predecessor `bytes32(0)`**, single operation, and check `GuardianController.isProtectedCall` first. A recovery
