@@ -25,6 +25,7 @@ import {TokenBucket} from "./libraries/TokenBucket.sol";
 ///   the Guardian and migrating reserves.
 /// @dev Non-upgradeable. Every successful `fund`/`recall` moves exactly `amount` between this contract and the pool,
 /// leaves the adapter balance unchanged and leaves zero adapter-to-pool allowance; otherwise it reverts.
+/// @custom:security-contact security@saharalabs.ai
 contract LiquidityManager is ILiquidityManager, Ownable2Step, ReentrancyGuard {
   using SafeERC20 for IERC20;
   using TokenBucket for TokenBucket.Bucket;

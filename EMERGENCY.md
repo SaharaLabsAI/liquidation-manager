@@ -46,7 +46,7 @@ emergency switch: the Guardian cannot pause, and the Timelock's pause waits the 
 
 `migrateReserves` rejects destinations that cannot give tokens back or would bypass the funding budgets: zero, the
 Manager itself, the token, any adapter ever registered, the pool (any pool known to the Manager or the registry) and
-contracts reporting this Manager as `MANAGER()`, e.g. the GuardianController (LM:396) **[08 E1]**. Any other
+contracts reporting this Manager as `MANAGER()`, e.g. the GuardianController (LM:397) **[08 E1]**. Any other
 destination must be checked off-chain.
 
 ## 3. Recipes
@@ -113,7 +113,7 @@ batch: pool.setRebalancer(newAdapter)
 `replaceAdapter` alone reverts `PoolRebalancerMismatch` **[08 E3]**. The old adapter stays in `getAdapterHistory`,
 is rejected as a migration destination and can no longer withdraw from the pool. **Before the ETA, verify the new
 adapter's bytecode against `CCIPPoolAdapter`**: `_verifyPool` only checks that its `MANAGER()`, `TOKEN()` and `POOL()`
-views match (LM:549), and the batch makes it the pool's rebalancer, which can withdraw directly.
+views match (LM:550), and the batch makes it the pool's rebalancer, which can withdraw directly.
 
 ### R5 Bridge lockdown and restore
 

@@ -5,6 +5,7 @@ pragma solidity ^0.8.24;
 /// tokens per second up to `capacity`.
 /// @dev Usage is never reset: reconfiguration keeps the current (refilled) balance, capped at the new capacity. Only a
 /// bucket's first configuration starts it full.
+/// @custom:security-contact security@saharalabs.ai
 library TokenBucket {
   struct Bucket {
     uint256 capacity;

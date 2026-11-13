@@ -205,6 +205,10 @@ forks by [`script/mainnet-fork/`](script/mainnet-fork/README.md).
   `paused()`. The read-only monitor in [`monitor/`](monitor/README.md) covers all of these; its
   [rule catalog](monitor/README.md#rule-catalog) lists every alert with its severity and first response.
 
+## Security
+
+Report vulnerabilities privately to security@saharalabs.ai; see [`SECURITY.md`](SECURITY.md).
+
 ## Development
 
 ```sh
