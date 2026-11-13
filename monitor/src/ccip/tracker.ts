@@ -566,8 +566,10 @@ export function failureAlert(
     note:
       `The ${symbol} is locked on ${source} but was not released on ${destChain}: it is still owed and counts in ` +
       `the in-flight amount I until the message executes. Fix the cause first (ERC20InsufficientBalance: the ` +
-      `${destChain} pool lacks inventory; a rate-limit error: wait for the bucket), then manually execute the ` +
-      `message from the CCIP explorer. A manual attempt that fails again reverts and leaves no log.`,
+      `${destChain} pool lacks inventory; TokenRateLimitReached: wait for the bucket; TokenMaxCapacityExceeded: ` +
+      `the amount is above the bucket's capacity, which is 0 while the pool is locked down, so it waits for the ` +
+      `Timelock restore, see EMERGENCY.md R5), then manually execute the message from the CCIP explorer. A manual ` +
+      `attempt that fails again reverts and leaves no log.`,
   };
 }
 

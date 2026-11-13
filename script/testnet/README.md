@@ -142,6 +142,9 @@ Sepolia**, 91 transactions on each chain. The testnet stacks are left operationa
 - Pool migration with a second pool (`setPoolMigrationApproval`, `transferLiquidity(oldPool, type(uint256).max)`).
 - Moving to a new Timelock with a new GuardianController.
 - The full unwind to the legacy owner (10) ran on forks only.
+- A lockdown with CCIP messages in flight (they fail on the locked chain and are executed manually after the restore)
+  and the two-operation restore that clears them before sends reopen (EMERGENCY.md R5). 07, 08 and 11 refuse to start
+  live until the test transfers of both directions are delivered.
 
 ### bsc
 

@@ -186,6 +186,10 @@ forks by [`script/mainnet-fork/`](script/mainnet-fork/README.md).
   requires resetting the old pool's rebalancer to its adapter afterwards.
 - Restoring rate limits with `setChainRateLimiterConfig` starts the buckets from zero; `applyChainUpdates` (chain
   removal and re-add) starts them full and also rewrites remote configuration: review or cancel during incidents.
+- A lockdown also fails the releases of messages already in flight to that chain, and manual execution cannot bypass
+  it. Lock down both chains, keep the list of unsettled messages, check that each is backed by a source-chain send
+  before the restore (which lets anyone execute them), and execute them manually once the restored inbound bucket
+  covers them ([`EMERGENCY.md`](EMERGENCY.md) R5).
 - `replaceAdapter` runs the full pool verification, so a retired pool's adapter can only be replaced while the pool
   still matches its spec (with a migration approval if it is no longer in the registry). Recall through the existing
   adapter does not depend on these checks.

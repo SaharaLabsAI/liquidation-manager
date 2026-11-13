@@ -16,7 +16,7 @@ the token and administers the token in the TokenAdminRegistry. The Governance Sa
 | --- | --- | --- | --- | --- | --- |
 | `pauseFunding`, `suspendFundingOperator`, `restrictAdapter(id, true, _)`, `reduceMaxFundingPerCall`, `reduce*FundingBudget` | Guardian | Immediately | Manager → pool funding | recall, bridge, Timelock ops | Timelock, full delay **[05]** |
 | `pauseRecall`, `suspendRecallOperator`, `restrictAdapter(id, _, true)`, `reduceRecallLimits`, `raisePoolMinimum` | Guardian | Immediately | pool → Manager recall | funding, bridge, Timelock ops | Timelock, full delay **[05]** |
-| `GC.lockdown(pool)` | Guardian | Immediately | CCIP sends **and** releases through that pool (both buckets of every supported chain set to enabled, capacity 0, rate 0) | fund, recall, every Timelock pool operation **[11 X3]** | Timelock `pool.setChainRateLimiterConfig`, buckets restart **empty** **[07]** |
+| `GC.lockdown(pool)` | Guardian | Immediately | CCIP sends **and** releases through that pool (both buckets of every supported chain set to enabled, capacity 0, rate 0), including the releases of messages already in flight to this chain (R5) | fund, recall, every Timelock pool operation **[11 X3]**; sends on the other chain | Timelock `pool.setChainRateLimiterConfig`, buckets restart **empty** **[07]**; then execute the failed messages manually (R5) |
 | `GC.cancel` / `GC.cancelBatch` | Guardian | Immediately | any pending operation, Waiting **or Ready** **[06, 11 X2]** | a standalone `setGuardian(address)` (protected) **[06]** | Re-schedule (same salt allowed after a cancel) **[11 X2]** |
 | `TL.cancel(id)` | Governance Safe | Immediately | any pending operation, protected ones included **[06]** | | |
 | `token.pause()` | Timelock | **After the full delay** | every SAHARA transfer: fund, recall, `migrateReserves`, CCIP lock and release, user transfers **[08 E4]** | | Timelock `unpause()`, full delay |
@@ -127,7 +127,70 @@ Timelock: pool.setChainRateLimiterConfig(remoteSelector, outCfg, inCfg) // origi
   restore: it starts the buckets full and rewrites the remote configuration.
 - A restore can be scheduled before the lockdown so the delay overlaps the incident **[07]**; during an incident the
   Guardian must cancel any restore it did not expect.
-- Failed inbound messages must be executed manually once the inbound bucket covers them.
+- Messages already in flight to a locked-down chain fail there and wait for a manual execution after the restore
+  (below).
+
+**In-flight transfers (not drilled).** `run-live.sh` starts 07 only once every test transfer is delivered, so no
+message was in flight during the testnet lockdown. The pool side is fork-tested against the live pools
+(`test_fork_lockdown_haltsRealBridgeTransfers`, `testFuzz_fork_lockdownRejectsEveryTransfer`,
+`test_fork_lockdown_timelockRestoresAndBucketsRefillFromZero`); the OffRamp side is as the monitor records it. Chain A
+locked down, B its counterpart:
+
+| Message | Effect |
+| --- | --- |
+| A → B, sent after the lockdown | `ccipSend` on A reverts `TokenMaxCapacityExceeded` (A's outbound bucket) **[07]**: nothing is locked, no message exists. |
+| A → B, sent before the lockdown | Not affected by it (the outbound bucket was consumed at send): released on B, unless B is locked down too. |
+| B → A, sent while B's outbound bucket is open (before B's lockdown, or at any time if B is not locked down) | B's pool has locked the SAHARA. The release on A reverts in A's inbound bucket with `TokenMaxCapacityExceeded`, so the execution fails on A's OffRamp: the receiver gets nothing, the SAHARA stays locked on B and the message stays in `I`. |
+
+- The monitor raises `ccip.message-failed` on A, with the reason `TokenHandlingError(target=…,
+  err=TokenMaxCapacityExceeded(…truncated))` on OffRamp 2.0.0, and lists the message in `reconcile.failed-messages`. A
+  message the executor has not attempted yet shows up as `reconcile.stuck-message` after `ccip.stuckAfterSec` instead.
+- Manual execution calls the same `releaseOrMint` and consumes the same bucket: it cannot bypass the lockdown, and after
+  the restore it succeeds only once the bucket has refilled to the message's amount. On OffRamp 2.0.0 a manual attempt
+  that fails again reverts and leaves no log, so retrying early only costs gas.
+
+**Lock down both chains.** A's lockdown does not stop sends on B: until B is locked down as well, B keeps accepting
+sends to A, locks their SAHARA, and every one of them fails on A. Locking B fails the A → B messages still in flight
+there instead, a set that stops growing once A is locked. Each lockdown is a separate Guardian Safe transaction on its
+own chain: prepare both, lock the chain whose releases are at risk first, then the other, and add the A → B messages
+that fail on B to the list below.
+
+**Track the unsettled messages.** From the lockdown on, keep the list of every SAHARA message not executed in either
+direction (message id, direction, amount, receiver); it is the retry list. The monitor's `check` prints all of them
+(failed and stuck, each with its CCIP explorer link) and `I` per lane; `ccip.message-failed` raises each failure,
+`reconcile.failed-messages` shows the first 10 and counts the rest, `reconcile.stuck-message` raises each message
+without an execution, and the [CCIP explorer](https://ccip.chain.link) for both pools is the cross-check. Messages
+sent to a chain while it is locked down extend the list.
+
+**Check the list before the restore.** Once the inbound bucket is restored, any message to that chain that the bucket
+covers can be executed, listed or not: OffRamp 2.0.0 `execute` is permissionless. Before scheduling the restore, find
+the source-chain send of every failed message that `check` shows with an unknown amount (no send seen). If there is
+none, the message is unbacked: keep the lockdown and escalate instead of restoring.
+
+**Retry after the restore.** On the destination chain of each listed message:
+
+1. The restored inbound capacity must cover the largest listed amount: above the capacity the release reverts
+   `TokenMaxCapacityExceeded` however long the bucket refills. Check it when restoring lower limits than before.
+2. The bucket restarts empty **[07]**, so a message of `amount` can execute `amount / rate` seconds after the restore at
+   the earliest, and later if new transfers consume the bucket first. With the current pool limits (capacity 300M,
+   3,500 SAHARA/s): about 48 min for 10M, 24 h for the full capacity. `getCurrentInboundRateLimiterState(remote).tokens`
+   is what is available now.
+3. The pool must hold the amount, or the release fails with `ERC20InsufficientBalance` (e.g. after R2). Fund the pool
+   first. If the Guardian paused funding, `fund` reverts `FundingIsPaused` until a Timelock `LM.setFundingPaused(false)`
+   executes: schedule it together with the restore.
+4. Execute the messages manually from the CCIP explorer, oldest first, each once the bucket covers it. A failed one
+   raises `ccip.message-executed` and leaves `reconcile.failed-messages`; a stuck one raises nothing and its
+   `reconcile.stuck-message` resolves. Both leave `I`.
+
+To clear the backlog before new transfers compete for the inbound buckets, restore in two operations **(not
+drilled)**: first `pool.setChainRateLimiterConfig(remote, {true, 0, 0}, inCfg)` on both chains (sends stay refused,
+releases refill), then `(remote, outCfg, inCfg)` once the listed messages have executed. Record any that cannot (e.g.
+a `ReceiverError` only the receiver can fix) and do not wait for them. Schedule both together, the second with the
+first's operation id as `predecessor`: executed after the second, the first would close the outbound bucket again. The
+second shows as `timelock-queue.blocked` until the first executes, then waits Ready (operations never expire); give
+the Guardian Safe both ids so it does not cancel them as unexpected restores. On the `1.6.3-dev` pool, re-applying the
+same `inCfg` keeps the inbound tokens (capped at the capacity, not reset). Until the second operation,
+`state-pool.lockdown` stays open for the outbound direction.
 
 ### R6 Replace or remove the Guardian
 
@@ -206,7 +269,7 @@ Simulated on a fork only **[10]**. Remove the Guardian separately (R6) if the co
 | Guardian compromised | (none: it is the problem) | R6 first (protected, cannot be cancelled), then restore what it restricted and cancel nothing it queued | after R6, R1 / R2 |
 | Governance Safe compromised | cancel every non-protected operation before its ETA; lockdown on both chains; `pauseFunding` | — | only cancellation delays an attacker. Once a protected `setGuardian(rogue)` executes, the honest Guardian has no power |
 | Adapter bug | `restrictAdapter(id, true, true)` | R4 (verify the new adapter's bytecode) | R2 if the pool must be emptied meanwhile |
-| Pool bug, lane incident, remote-chain exploit | `lockdown` on **both** chains, `pauseFunding`; if releases are unbacked or telemetry is stale, `pauseRecall` | R5 when resolved | R2 (pool) and R1 (Manager), lockdown first |
+| Pool bug, lane incident, remote-chain exploit | `lockdown` on **both** chains, `pauseFunding`; if releases are unbacked or telemetry is stale, `pauseRecall`; start the list of unsettled messages (R5) | R5 when resolved, after checking the unsettled messages are backed; then retry the failed messages (R5) | R2 (pool) and R1 (Manager), lockdown first |
 | Registry mapping changed unexpectedly | `pauseFunding`, lockdown the registered pool (still recognised) | cancel any queued `setPool`; `registry.setPool(SAHARA, pool)` | recall still works (it does not check the registry) |
 | Manager must be abandoned | `pauseFunding` | R9 | R9 migrates the reserves |
 | Token-level emergency | lockdown on both chains | R7 | R1 with the unpause / migrate / pause batch |
@@ -215,7 +278,10 @@ Simulated on a fork only **[10]**. Remove the Guardian separately (R6) if the co
 ## 5. Gotchas
 
 - **Every response is per chain.** Each chain has its own Timelock, Manager, controller and token owner. A lockdown
-  on one chain leaves the other one open.
+  on one chain leaves the other one open: it keeps accepting sends whose releases fail on the locked chain (R5).
+- **A lockdown fails what is in flight.** Releases of messages already sent to a locked-down chain fail, the SAHARA
+  stays locked on the source chain, and only a manual execution after the restore, once the inbound bucket has
+  refilled to the amount, delivers them. The restore lets anyone execute them: check they are backed first (R5).
 - **Operations never expire.** A failed `execute` leaves the operation Ready, and it can succeed later when the state
   changes (a drain once the pool refills, an unpause bracket once the token is paused again). Cancel failed and
   abandoned operations.
