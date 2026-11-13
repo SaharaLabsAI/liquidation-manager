@@ -11,6 +11,7 @@ import {TimelockController} from "@openzeppelin/contracts/governance/TimelockCon
 ///   own proposals. `cancellers` (the GuardianController) are granted CANCELLER_ROLE in addition.
 /// - Executors must be explicit accounts; open execution (address(0)) is rejected. Every proposer must also be an
 ///   executor, so governance can always execute its own operations, including a Guardian removal.
+/// @custom:security-contact security@saharalabs.ai
 contract SaharaTimelock is TimelockController {
   error InvalidDelayBounds(uint256 minimumDelay, uint256 maximumDelay);
   error DelayOutOfBounds(uint256 delay, uint256 minimumDelay, uint256 maximumDelay);

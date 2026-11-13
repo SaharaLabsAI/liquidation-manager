@@ -13,6 +13,7 @@ import {ILockReleaseTokenPool} from "./interfaces/ILockReleaseTokenPool.sol";
 /// the adapter (the pool pays its rebalancer) and is forwarded to the immutable Manager in the same call. SAHARA sent
 /// to the adapter outside of `fund`/`recall` stays here; the Manager verifies the adapter balance is unchanged by every
 /// operation.
+/// @custom:security-contact security@saharalabs.ai
 contract CCIPPoolAdapter is ILiquidityAdapter {
   using SafeERC20 for IERC20;
 

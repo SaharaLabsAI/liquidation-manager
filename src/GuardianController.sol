@@ -14,6 +14,7 @@ import {ILockReleaseTokenPool} from "./interfaces/ILockReleaseTokenPool.sol";
 /// - Holds the pool's rateLimitAdmin. It can only set both buckets of every supported chain to enabled with zero
 ///   capacity and zero refill; restoring them requires the pool owner (the Timelock).
 /// @dev Non-upgradeable and ownerless. Removing or replacing the Guardian on the Manager revokes its authority here.
+/// @custom:security-contact security@saharalabs.ai
 contract GuardianController {
   error CallerNotGuardian(address caller);
   error ProtectedOperation(bytes32 id);

@@ -186,6 +186,10 @@ forks by [`script/mainnet-fork/`](script/mainnet-fork/README.md).
   requires resetting the old pool's rebalancer to its adapter afterwards.
 - Restoring rate limits with `setChainRateLimiterConfig` starts the buckets from zero; `applyChainUpdates` (chain
   removal and re-add) starts them full and also rewrites remote configuration: review or cancel during incidents.
+- A lockdown also fails the releases of messages already in flight to that chain, and manual execution cannot bypass
+  it. Lock down both chains, keep the list of unsettled messages, check that each is backed by a source-chain send
+  before the restore (which lets anyone execute them), and execute them manually once the restored inbound bucket
+  covers them ([`EMERGENCY.md`](EMERGENCY.md) R5).
 - `replaceAdapter` runs the full pool verification, so a retired pool's adapter can only be replaced while the pool
   still matches its spec (with a migration approval if it is no longer in the registry). Recall through the existing
   adapter does not depend on these checks.
@@ -204,6 +208,10 @@ forks by [`script/mainnet-fork/`](script/mainnet-fork/README.md).
   `rateLimitAdmin`, Router, remote configuration and rate limits, registry mapping and administrator, token owner and
   `paused()`. The read-only monitor in [`monitor/`](monitor/README.md) covers all of these; its
   [rule catalog](monitor/README.md#rule-catalog) lists every alert with its severity and first response.
+
+## Security
+
+Report vulnerabilities privately to security@saharalabs.ai; see [`SECURITY.md`](SECURITY.md).
 
 ## Development
 
